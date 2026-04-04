@@ -1,4 +1,4 @@
-# Plex Music Tool
+# Plex Playlist Tools
 
 Export your Plex music library and playlists to CSV, and import them back again. Works with Plex running **locally or anywhere on your network**.
 
@@ -9,12 +9,15 @@ Export your Plex music library and playlists to CSV, and import them back again.
 1. [Requirements](#requirements)
 2. [Installation](#installation)
 3. [Configuration](#configuration)
-4. [Commands](#commands)
+4. [Connection](#connection)
+   - [Token auto-detection](#token-auto-detection)
+   - [Passing connection details on the command line](#passing-connection-details-on-the-command-line)
+5. [Commands](#commands)
    - [list-playlists](#list-playlists)
    - [export](#export)
    - [import](#import)
-5. [Output Files](#output-files)
-6. [Common Scenarios](#common-scenarios)
+6. [Output Files](#output-files)
+7. [Common Scenarios](#common-scenarios)
 
 ---
 
@@ -45,17 +48,17 @@ cp .env.example .env
 
 | Variable            | Required | Description                                                                  |
 |---------------------|----------|------------------------------------------------------------------------------|
-| `PLEX_URL`          | Yes      | URL of your Plex server (e.g. `http://192.168.1.50:32400`)                   |
-| `PLEX_TOKEN`        | Yes      | Your Plex authentication token                                               |
+| `PLEX_URL`          | No       | URL of your Plex server (default: `http://localhost:32400`)                  |
+| `PLEX_TOKEN`        | No       | Your Plex auth token — auto-detected from local Plex if not set              |
 | `PLEX_LIBRARY_NAME` | No       | Music library name to use — uses the first found if blank                    |
 | `OUTPUT_FILE`       | No       | Default export CSV filename (default: `plex_music_export.csv`)               |
 | `IMPORT_FILE`       | No       | Default import CSV filename (default: `plex_music_export.csv`)               |
 | `LOG_FILE`          | No       | Default log CSV filename (default: `plex_music_log.csv`)                     |
 | `IMAGES_DIR`        | No       | Directory for playlist cover images — skipped entirely if blank              |
 
-All file path settings can also be overridden per-run with CLI flags (`--output`, `--file`, `--log`).
+All settings can also be passed directly as CLI flags and will take precedence over `.env` values.
 
-### Finding your Plex token
+### Finding your Plex token manually
 
 1. Open Plex Web and sign in
 2. Browse to any media item, click **"..." → Get Info → View XML**
@@ -63,18 +66,43 @@ All file path settings can also be overridden per-run with CLI flags (`--output`
 
 Full guide: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
 
-### Connecting to a networked Plex server
+---
 
-If Plex is running on another machine, replace `localhost` with its IP address:
+## Connection
 
-```ini
-PLEX_URL=http://192.168.1.50:32400
-```
+The tool resolves the Plex URL and token using the following priority order:
 
-HTTPS and custom domains are also supported:
+| Priority | Source                          | How to set                          |
+|----------|---------------------------------|-------------------------------------|
+| 1 (highest) | CLI flag                    | `--url URL` / `--token TOKEN`       |
+| 2        | `.env` file                     | `PLEX_URL=...` / `PLEX_TOKEN=...`   |
+| 3 (lowest)  | Auto-detected from local Plex | Plex installed on the same machine  |
 
-```ini
-PLEX_URL=https://plex.yourdomain.com:32400
+### Token auto-detection
+
+If `PLEX_TOKEN` is not set in `.env` and `--token` is not passed, the tool automatically reads the token from the Plex Media Server `Preferences.xml` file on the local machine. This means **no configuration is needed** if Plex is installed on the machine you're running the tool from.
+
+Supported locations:
+
+| OS      | Preferences.xml path                                                                                     |
+|---------|----------------------------------------------------------------------------------------------------------|
+| Windows | `%LOCALAPPDATA%\Plex Media Server\Preferences.xml`                                                       |
+| macOS   | `~/Library/Application Support/Plex Media Server/Preferences.xml`                                        |
+| Linux   | `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml`                 |
+
+### Passing connection details on the command line
+
+Use `--url` and `--token` to connect without a `.env` file, or to override it for a single run. These flags come **before** the subcommand:
+
+```bash
+# Connect to a remote server with an explicit token
+python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN list-playlists
+
+# Export using a different server than the one in .env
+python plex_playlist_tools.py --url http://192.168.1.100:32400 export --all-playlists
+
+# Use HTTPS
+python plex_playlist_tools.py --url https://plex.yourdomain.com:32400 --token YOUR_TOKEN export --all-playlists
 ```
 
 ---
@@ -84,8 +112,10 @@ PLEX_URL=https://plex.yourdomain.com:32400
 All commands share the same entry point:
 
 ```
-python plex_music.py <command> [options]
+python plex_playlist_tools.py [--url URL] [--token TOKEN] <command> [options]
 ```
+
+The `--url` and `--token` flags are optional and come **before** the subcommand. They override any values set in `.env`.
 
 ---
 
@@ -94,7 +124,11 @@ python plex_music.py <command> [options]
 Lists all music playlists on your Plex server with their track counts.
 
 ```bash
-python plex_music.py list-playlists
+# Using .env or auto-detected token
+python plex_playlist_tools.py list-playlists
+
+# Connecting to a specific server with an explicit token
+python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN list-playlists
 ```
 
 **Example output:**
@@ -272,4 +306,19 @@ python plex_playlist_tools.py export --all-playlists --output backup.csv
 
 ```bash
 python plex_playlist_tools.py list-playlists
+```
+
+### Connect without a .env file (one-off or CI use)
+
+```bash
+python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN export --all-playlists
+```
+
+### Plex is installed locally — no configuration needed
+
+If Plex is installed on the same machine, the token is auto-detected and `PLEX_URL` defaults to `localhost:32400`, so no `.env` is required:
+
+```bash
+python plex_playlist_tools.py list-playlists
+python plex_playlist_tools.py export --all-playlists
 ```

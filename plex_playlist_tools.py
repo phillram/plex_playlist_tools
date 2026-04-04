@@ -1,20 +1,28 @@
 """
-Plex Music Tool
+Plex Playlist Tools
 Export and import Plex music playlists and libraries.
 
 Usage:
-  python plex_music.py export                         # export full library
-  python plex_music.py export --playlist "My Mix"     # export specific playlist(s)
-  python plex_music.py export --all-playlists         # export all playlists
-  python plex_music.py import --file export.csv       # import playlists from CSV
-  python plex_music.py list-playlists                 # list all music playlists
+  python plex_playlist_tools.py [--url URL] [--token TOKEN] <command> [options]
+
+Commands:
+  export          Export full library or playlist(s) to CSV
+  import          Import playlists from a CSV back into Plex
+  list-playlists  List all music playlists on the server
+
+Connection (in order of precedence):
+  1. --url / --token CLI flags
+  2. PLEX_URL / PLEX_TOKEN in .env
+  3. Auto-detected from local Plex Media Server Preferences.xml
 """
 
 import argparse
 import csv
 import os
+import platform
 import re
 import sys
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -54,6 +62,37 @@ def find_music_library(plex: PlexServer, library_name: str | None):
         for s in sections:
             print(f"  - {s.title}")
     return sections[0]
+
+
+def auto_detect_plex_token() -> str | None:
+    """
+    Try to read the Plex auth token from the local Plex Media Server Preferences.xml.
+    Supports Windows, macOS, and Linux. Returns the token string or None if not found.
+    """
+    system = platform.system()
+
+    if system == "Windows":
+        local_app_data = os.getenv("LOCALAPPDATA", "")
+        prefs_path = os.path.join(local_app_data, "Plex Media Server", "Preferences.xml")
+    elif system == "Darwin":
+        prefs_path = os.path.expanduser(
+            "~/Library/Application Support/Plex Media Server/Preferences.xml"
+        )
+    else:  # Linux / Docker
+        candidates = [
+            "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml",
+            "/config/Library/Application Support/Plex Media Server/Preferences.xml",
+        ]
+        prefs_path = next((p for p in candidates if os.path.exists(p)), "")
+
+    if not prefs_path or not os.path.exists(prefs_path):
+        return None
+
+    try:
+        root = ET.parse(prefs_path).getroot()
+        return root.get("PlexOnlineToken") or None
+    except Exception:
+        return None
 
 
 # ─── Image helpers ───────────────────────────────────────────────────────────
@@ -417,8 +456,7 @@ def list_playlists(plex: PlexServer):
 def main():
     load_dotenv()
 
-    base_url     = os.getenv("PLEX_URL", "http://localhost:32400")
-    token        = os.getenv("PLEX_TOKEN", "")
+    # File path and library defaults from .env (used as argparse defaults)
     library_name = os.getenv("PLEX_LIBRARY_NAME", "") or None
     default_out  = os.getenv("OUTPUT_FILE", "plex_music_export.csv")
     default_log  = os.getenv("LOG_FILE",    "plex_music_log.csv")
@@ -426,9 +464,20 @@ def main():
     default_imgs = os.getenv("IMAGES_DIR",  "") or None
 
     parser = argparse.ArgumentParser(
-        prog="plex_music.py",
+        prog="plex_playlist_tools.py",
         description="Export and import Plex music playlists and libraries.",
     )
+
+    # ── Global connection flags (override .env) ──
+    parser.add_argument(
+        "--url", metavar="URL", default=None,
+        help="Plex server URL (overrides PLEX_URL in .env)",
+    )
+    parser.add_argument(
+        "--token", metavar="TOKEN", default=None,
+        help="Plex auth token (overrides PLEX_TOKEN in .env; auto-detected from local Plex if neither is set)",
+    )
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── export ──
@@ -467,8 +516,20 @@ def main():
 
     args = parser.parse_args()
 
+    # ── Resolve connection settings: CLI flag > .env > auto-detect ──
+    base_url = args.url   or os.getenv("PLEX_URL",   "http://localhost:32400")
+    token    = args.token or os.getenv("PLEX_TOKEN", "")
+
     if not token:
-        print("Error: PLEX_TOKEN is not set. Add it to your .env file.")
+        token = auto_detect_plex_token() or ""
+        if token:
+            print("Plex token auto-detected from local Plex Media Server.")
+
+    if not token:
+        print("Error: No Plex token found. Provide one via:")
+        print("  --token YOUR_TOKEN")
+        print("  PLEX_TOKEN=... in .env")
+        print("  Or install Plex Media Server locally (token is auto-detected)")
         print("Find your token: https://support.plex.tv/articles/204059436")
         sys.exit(1)
 
