@@ -29,7 +29,7 @@ Export your Plex music library and playlists to CSV, and import them back again.
 ## Installation
 
 ```bash
-cd plex_music_exporter
+cd plex_playlist_tools
 pip install -r requirements.txt
 ```
 
@@ -51,6 +51,7 @@ cp .env.example .env
 | `OUTPUT_FILE`       | No       | Default export CSV filename (default: `plex_music_export.csv`)               |
 | `IMPORT_FILE`       | No       | Default import CSV filename (default: `plex_music_export.csv`)               |
 | `LOG_FILE`          | No       | Default log CSV filename (default: `plex_music_log.csv`)                     |
+| `IMAGES_DIR`        | No       | Directory for playlist cover images — skipped entirely if blank              |
 
 All file path settings can also be overridden per-run with CLI flags (`--output`, `--file`, `--log`).
 
@@ -119,29 +120,35 @@ Exports music data to a CSV file. Three modes are available:
 
 **Flags:**
 
-| Flag          | Default                   | Description                    |
-|---------------|---------------------------|--------------------------------|
-| `--output`    | `OUTPUT_FILE` from `.env` | Path for the output CSV        |
-| `--log`       | `LOG_FILE` from `.env`    | Path for the log CSV           |
+| Flag            | Default                    | Description                                              |
+|-----------------|----------------------------|----------------------------------------------------------|
+| `--output`      | `OUTPUT_FILE` from `.env`  | Path for the output CSV                                  |
+| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                     |
+| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to save cover images (skipped if not provided) |
 
 **Examples:**
 
 ```bash
 # Export the full music library
-python plex_music.py export
+python plex_playlist_tools.py export
 
 # Export a single playlist
-python plex_music.py export --playlist "Road Trip"
+python plex_playlist_tools.py export --playlist "Road Trip"
 
 # Export multiple playlists in one file
-python plex_music.py export --playlist "Road Trip" "Chill Mix" "Workout"
+python plex_playlist_tools.py export --playlist "Road Trip" "Chill Mix" "Workout"
 
 # Export all playlists
-python plex_music.py export --all-playlists
+python plex_playlist_tools.py export --all-playlists
+
+# Export all playlists including their cover images
+python plex_playlist_tools.py export --all-playlists --images-dir playlist_images
 
 # Export with custom output filenames
-python plex_music.py export --all-playlists --output my_playlists.csv --log my_log.csv
+python plex_playlist_tools.py export --all-playlists --output my_playlists.csv --log my_log.csv
 ```
+
+> **Note:** Images are saved as `{images-dir}/{playlist name}.jpg` (or `.png`). Library exports (`--library`) do not support image export since they have no associated playlist artwork.
 
 ---
 
@@ -153,25 +160,31 @@ Reads a previously exported CSV and recreates the playlists in Plex. Tracks are 
 
 **Flags:**
 
-| Flag     | Default                   | Description                      |
-|----------|---------------------------|----------------------------------|
-| `--file` | `IMPORT_FILE` from `.env` | CSV file to import from          |
-| `--log`  | `LOG_FILE` from `.env`    | Path for the log CSV             |
+| Flag            | Default                    | Description                                                   |
+|-----------------|----------------------------|---------------------------------------------------------------|
+| `--file`        | `IMPORT_FILE` from `.env`  | CSV file to import from                                       |
+| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                          |
+| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to read cover images from (skipped if not provided) |
 
 **Examples:**
 
 ```bash
 # Import using the default file (plex_music_export.csv)
-python plex_music.py import
+python plex_playlist_tools.py import
 
 # Import from a specific file
-python plex_music.py import --file my_playlists.csv
+python plex_playlist_tools.py import --file my_playlists.csv
+
+# Import with cover images restored
+python plex_playlist_tools.py import --file my_playlists.csv --images-dir playlist_images
 
 # Import with a custom log file
-python plex_music.py import --file my_playlists.csv --log import_log.csv
+python plex_playlist_tools.py import --file my_playlists.csv --log import_log.csv
 ```
 
 > **Tip:** Only CSVs that were exported with `--playlist` or `--all-playlists` can be imported (they must have a populated `Playlist` column). Library exports have a blank `Playlist` column and are not importable.
+
+> **Note:** On import, the tool looks for `{images-dir}/{playlist name}.jpg` (falling back to `.png`). If the file exists, it is uploaded as the playlist's cover. If a playlist already exists in Plex, it is replaced before the image is uploaded.
 
 ---
 
@@ -207,24 +220,26 @@ Road Trip,Fleetwood Mac,Rumours,1977,1,Second Hand News,143,Rock,/music/Fleetwoo
 
 Produced by both `export` and `import` commands. Each run **appends** to the log file so you have a full history.
 
-| Column      | Description                                        |
-|-------------|----------------------------------------------------|
-| Timestamp   | Date and time of the operation (ISO 8601)          |
-| Operation   | `export` or `import`                               |
-| Playlist    | Playlist name (blank for library exports)          |
-| Artist      | Artist name                                        |
-| Album       | Album title                                        |
-| Track Title | Name of the track                                  |
-| Status      | `success` or `error`                               |
-| Message     | Details — match method on success, reason on error |
+| Column      | Description                                                                        |
+|-------------|------------------------------------------------------------------------------------|
+| Timestamp   | Date and time of the operation (ISO 8601)                                          |
+| Operation   | `export`, `import`, `export_image`, or `import_image`                             |
+| Playlist    | Playlist name (blank for library exports)                                          |
+| Artist      | Artist name (blank for image rows)                                                 |
+| Album       | Album title (blank for image rows)                                                 |
+| Track Title | Name of the track (blank for image rows)                                           |
+| Status      | `success`, `error`, or `skipped`                                                   |
+| Message     | Details — file path on image success, reason on error/skip                         |
 
 **Example:**
 
 ```
 Timestamp,Operation,Playlist,Artist,Album,Track Title,Status,Message
 2026-04-04T14:32:01,export,Road Trip,Tom Petty,Greatest Hits,American Girl,success,
+2026-04-04T14:32:05,export_image,Road Trip,,,,success,Saved to playlist_images/Road Trip.jpg
 2026-04-04T14:35:10,import,Road Trip,Tom Petty,Greatest Hits,American Girl,success,Matched and added to playlist
 2026-04-04T14:35:10,import,Road Trip,Unknown Band,Unknown Album,Mystery Track,error,Track not found in Plex library
+2026-04-04T14:35:12,import_image,Road Trip,,,,success,Playlist image uploaded
 ```
 
 ---
@@ -234,21 +249,27 @@ Timestamp,Operation,Playlist,Artist,Album,Track Title,Status,Message
 ### Back up all playlists and restore them
 
 ```bash
-# Step 1 — export
-python plex_music.py export --all-playlists --output backup.csv
+# Step 1 — export tracks and cover images
+python plex_playlist_tools.py export --all-playlists --output backup.csv --images-dir playlist_images
 
 # Step 2 — restore (e.g. after a server migration)
-python plex_music.py import --file backup.csv
+python plex_playlist_tools.py import --file backup.csv --images-dir playlist_images
 ```
 
 ### Export one playlist and check the log for issues
 
 ```bash
-python plex_music.py export --playlist "Chill Mix" --output chill.csv --log chill_log.csv
+python plex_playlist_tools.py export --playlist "Chill Mix" --output chill.csv --log chill_log.csv
+```
+
+### Export playlists without images
+
+```bash
+python plex_playlist_tools.py export --all-playlists --output backup.csv
 ```
 
 ### See what playlists are available before exporting
 
 ```bash
-python plex_music.py list-playlists
+python plex_playlist_tools.py list-playlists
 ```

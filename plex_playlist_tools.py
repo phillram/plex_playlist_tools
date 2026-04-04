@@ -13,6 +13,7 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -53,6 +54,59 @@ def find_music_library(plex: PlexServer, library_name: str | None):
         for s in sections:
             print(f"  - {s.title}")
     return sections[0]
+
+
+# ─── Image helpers ───────────────────────────────────────────────────────────
+
+def sanitize_filename(name: str) -> str:
+    """Strip characters that are invalid in filenames."""
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
+
+
+def download_playlist_image(plex: PlexServer, playlist, images_dir: str) -> str | None:
+    """Download the playlist thumbnail. Returns the saved file path, or None on failure."""
+    if not getattr(playlist, "thumb", None):
+        return None
+    os.makedirs(images_dir, exist_ok=True)
+    url = f"{plex._baseurl}{playlist.thumb}"
+    try:
+        resp = plex._session.get(url, params={"X-Plex-Token": plex._token}, timeout=15)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        ext = "png" if "png" in content_type else "jpg"
+        path = os.path.join(images_dir, f"{sanitize_filename(playlist.title)}.{ext}")
+        with open(path, "wb") as f:
+            f.write(resp.content)
+        return path
+    except Exception as e:
+        return None
+
+
+def upload_playlist_image(plex: PlexServer, playlist, images_dir: str) -> bool:
+    """Upload a saved thumbnail to a playlist. Returns True on success, False if no file found."""
+    safe_name = sanitize_filename(playlist.title)
+    image_path = None
+    for ext in ("jpg", "jpeg", "png"):
+        candidate = os.path.join(images_dir, f"{safe_name}.{ext}")
+        if os.path.exists(candidate):
+            image_path = candidate
+            break
+    if not image_path:
+        return False
+
+    content_type = "image/png" if image_path.endswith(".png") else "image/jpeg"
+    url = f"{plex._baseurl}/library/metadata/{playlist.ratingKey}/posters"
+    try:
+        with open(image_path, "rb") as f:
+            resp = plex._session.post(
+                url,
+                params={"X-Plex-Token": plex._token},
+                data=f.read(),
+                headers={"Content-Type": content_type},
+            )
+        return resp.ok
+    except Exception:
+        return False
 
 
 # ─── CSV helpers ─────────────────────────────────────────────────────────────
@@ -140,7 +194,7 @@ def export_library(plex: PlexServer, library_name: str | None,
 
 
 def export_playlists(plex: PlexServer, playlist_names: list | None,
-                     output_file: str, log_file: str):
+                     output_file: str, log_file: str, images_dir: str | None = None):
     all_playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
     if not all_playlists:
         print("No music playlists found on this Plex server.")
@@ -187,10 +241,27 @@ def export_playlists(plex: PlexServer, playlist_names: list | None,
                 "export", playlist.title, artist, album, track.title, "success"
             ))
 
+        if images_dir:
+            saved_path = download_playlist_image(plex, playlist, images_dir)
+            if saved_path:
+                print(f"    Image saved: {saved_path}")
+                log_rows.append(log_row(
+                    "export_image", playlist.title, "", "", "",
+                    "success", f"Saved to {saved_path}"
+                ))
+            else:
+                print(f"    Image: none available for '{playlist.title}'")
+                log_rows.append(log_row(
+                    "export_image", playlist.title, "", "", "",
+                    "skipped", "No thumbnail available"
+                ))
+
     print(f"\nExported {len(rows)} tracks across {total} playlist(s).")
     write_csv(output_file, EXPORT_FIELDS, rows)
     append_log(log_file, log_rows)
     print(f"Data : {output_file}")
+    if images_dir:
+        print(f"Images: {images_dir}/")
     print(f"Log  : {log_file}")
 
 
@@ -225,7 +296,7 @@ def build_track_index(library) -> tuple[dict, dict]:
 
 
 def import_playlists(plex: PlexServer, library_name: str | None,
-                     input_file: str, log_file: str):
+                     input_file: str, log_file: str, images_dir: str | None = None):
     try:
         with open(input_file, newline="", encoding="utf-8") as f:
             csv_rows = list(csv.DictReader(f))
@@ -295,13 +366,29 @@ def import_playlists(plex: PlexServer, library_name: str | None,
 
         if matched:
             # Replace existing playlist if it exists
+            new_playlist = None
             for existing in plex.playlists():
                 if existing.title == playlist_name:
                     existing.delete()
                     print(f"  Removed existing playlist '{playlist_name}'")
                     break
-            plex.createPlaylist(playlist_name, items=matched)
+            new_playlist = plex.createPlaylist(playlist_name, items=matched)
             print(f"  Created '{playlist_name}': {len(matched)} added, {failed} not found")
+
+            if images_dir and new_playlist:
+                ok = upload_playlist_image(plex, new_playlist, images_dir)
+                if ok:
+                    print(f"  Image uploaded for '{playlist_name}'")
+                    log_rows.append(log_row(
+                        "import_image", playlist_name, "", "", "",
+                        "success", "Playlist image uploaded"
+                    ))
+                else:
+                    print(f"  No image found for '{playlist_name}' in {images_dir}/")
+                    log_rows.append(log_row(
+                        "import_image", playlist_name, "", "", "",
+                        "skipped", f"No image file found in {images_dir}/"
+                    ))
         else:
             print(f"  No tracks matched — playlist '{playlist_name}' was not created")
 
@@ -336,6 +423,7 @@ def main():
     default_out  = os.getenv("OUTPUT_FILE", "plex_music_export.csv")
     default_log  = os.getenv("LOG_FILE",    "plex_music_log.csv")
     default_imp  = os.getenv("IMPORT_FILE", "plex_music_export.csv")
+    default_imgs = os.getenv("IMAGES_DIR",  "") or None
 
     parser = argparse.ArgumentParser(
         prog="plex_music.py",
@@ -358,17 +446,21 @@ def main():
         "--all-playlists", action="store_true",
         help="Export all music playlists",
     )
-    exp.add_argument("--output", default=default_out, metavar="FILE",
+    exp.add_argument("--output",     default=default_out,  metavar="FILE",
                      help=f"Output CSV file (default: {default_out})")
-    exp.add_argument("--log",    default=default_log, metavar="FILE",
+    exp.add_argument("--log",        default=default_log,  metavar="FILE",
                      help=f"Log CSV file (default: {default_log})")
+    exp.add_argument("--images-dir", default=default_imgs, metavar="DIR",
+                     help="Directory to save playlist cover images (skipped if not set)")
 
     # ── import ──
     imp = sub.add_parser("import", help="Import playlists from a CSV into Plex")
-    imp.add_argument("--file", default=default_imp, metavar="FILE",
+    imp.add_argument("--file",       default=default_imp,  metavar="FILE",
                      help=f"CSV file to import (default: {default_imp})")
-    imp.add_argument("--log",  default=default_log, metavar="FILE",
+    imp.add_argument("--log",        default=default_log,  metavar="FILE",
                      help=f"Log CSV file (default: {default_log})")
+    imp.add_argument("--images-dir", default=default_imgs, metavar="DIR",
+                     help="Directory to read playlist cover images from (skipped if not set)")
 
     # ── list-playlists ──
     sub.add_parser("list-playlists", help="List all music playlists on the server")
@@ -383,15 +475,17 @@ def main():
     plex = get_plex_server(base_url, token)
 
     if args.command == "export":
+        images_dir = getattr(args, "images_dir", None)
         if args.playlist:
-            export_playlists(plex, args.playlist, args.output, args.log)
+            export_playlists(plex, args.playlist, args.output, args.log, images_dir)
         elif args.all_playlists:
-            export_playlists(plex, None, args.output, args.log)
+            export_playlists(plex, None, args.output, args.log, images_dir)
         else:
             export_library(plex, library_name, args.output, args.log)
 
     elif args.command == "import":
-        import_playlists(plex, library_name, args.file, args.log)
+        images_dir = getattr(args, "images_dir", None)
+        import_playlists(plex, library_name, args.file, args.log, images_dir)
 
     elif args.command == "list-playlists":
         list_playlists(plex)
