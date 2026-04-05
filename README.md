@@ -54,7 +54,7 @@ cp .env.example .env
 | `OUTPUT_FILE`       | No       | Default export CSV filename (default: `plex_music_export.csv`)               |
 | `IMPORT_FILE`       | No       | Default import CSV filename (default: `plex_music_export.csv`)               |
 | `LOG_FILE`          | No       | Default log CSV filename (default: `plex_music_log.csv`)                     |
-| `IMAGES_DIR`        | No       | Directory for playlist cover images — skipped entirely if blank              |
+| `IMAGES_DIR`        | No       | Path to a directory where playlist cover images are saved/loaded. The directory will be created if it does not exist. Skipped entirely if blank. |
 
 All settings can also be passed directly as CLI flags and will take precedence over `.env` values.
 
@@ -156,10 +156,10 @@ Exports music data to a CSV file. Three modes are available:
 
 | Flag            | Default                    | Description                                                                    |
 |-----------------|----------------------------|--------------------------------------------------------------------------------|
-| `--output`      | `OUTPUT_FILE` from `.env`  | Path for the output CSV                                                        |
-| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                                           |
-| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to save cover images (skipped if not provided)                       |
-| `--all-images`  | off                        | Download every available cover per playlist, not just the selected one. Requires `--images-dir` |
+| `--output`      | `OUTPUT_FILE` from `.env`  | Path for the output CSV file                                                   |
+| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV file                                                      |
+| `--images-dir`  | `IMAGES_DIR` from `.env`   | Path to a directory where cover images will be saved. The directory will be created if it does not exist. Skipped if not provided. |
+| `--all-images`  | off                        | Download every available cover per playlist into the `--images-dir` directory, not just the selected one. Requires `--images-dir`. |
 
 **Examples:**
 
@@ -177,24 +177,28 @@ python plex_playlist_tools.py export --playlist "Road Trip" "Chill Mix" "Workout
 python plex_playlist_tools.py export --all-playlists
 
 # Export all playlists with the currently selected cover image
-python plex_playlist_tools.py export --all-playlists --images-dir playlist_images
+# Images are saved to the directory: ./covers/
+python plex_playlist_tools.py export --all-playlists --images-dir ./covers
 
 # Export all playlists with every available cover image (custom + auto-generated)
-python plex_playlist_tools.py export --all-playlists --images-dir playlist_images --all-images
+# All covers for each playlist are saved into a sub-folder: ./covers/{playlist name}/
+python plex_playlist_tools.py export --all-playlists --images-dir ./covers --all-images
 
 # Export a single playlist with all its covers
-python plex_playlist_tools.py export --playlist "Road Trip" --images-dir playlist_images --all-images
+python plex_playlist_tools.py export --playlist "Road Trip" --images-dir ./covers --all-images
 
 # Export with custom output filenames
 python plex_playlist_tools.py export --all-playlists --output my_playlists.csv --log my_log.csv
 ```
 
 > **Note on image saving:**
-> - `--images-dir` alone saves **one file** per playlist — the currently selected cover:
->   `{images-dir}/{playlist name}.jpg`
-> - `--all-images` saves **every available cover** into a sub-folder per playlist:
->   `{images-dir}/{playlist name}/{playlist name}-{index}[-selected].jpg`
->   The file with `-selected` in its name is the cover currently active in Plex.
+> - `--images-dir <directory>` must point to a directory (not a file). It will be created automatically if it does not exist.
+> - Without `--all-images`, one file is saved per playlist — the currently active cover:
+>   `<images-dir>/<playlist name>.jpg`
+> - With `--all-images`, every available cover is saved into a sub-folder per playlist:
+>   `<images-dir>/<playlist name>/<playlist name>-1-selected.jpg` (active cover)
+>   `<images-dir>/<playlist name>/<playlist name>-2.jpg`
+>   The `-selected` suffix identifies which cover is currently active in Plex.
 > - Library exports (`--library`) do not support image export since they have no associated playlist artwork.
 
 ---
@@ -207,11 +211,11 @@ Reads a previously exported CSV and recreates the playlists in Plex. Tracks are 
 
 **Flags:**
 
-| Flag            | Default                    | Description                                                   |
-|-----------------|----------------------------|---------------------------------------------------------------|
-| `--file`        | `IMPORT_FILE` from `.env`  | CSV file to import from                                       |
-| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                          |
-| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to read cover images from (skipped if not provided) |
+| Flag            | Default                    | Description                                                                              |
+|-----------------|----------------------------|------------------------------------------------------------------------------------------|
+| `--file`        | `IMPORT_FILE` from `.env`  | Path to the CSV file to import from                                                      |
+| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV file                                                                |
+| `--images-dir`  | `IMAGES_DIR` from `.env`   | Path to the directory containing exported cover images to restore. Skipped if not provided. |
 
 **Examples:**
 
@@ -222,8 +226,8 @@ python plex_playlist_tools.py import
 # Import from a specific file
 python plex_playlist_tools.py import --file my_playlists.csv
 
-# Import with cover images restored
-python plex_playlist_tools.py import --file my_playlists.csv --images-dir playlist_images
+# Import with cover images restored from a directory
+python plex_playlist_tools.py import --file my_playlists.csv --images-dir ./covers
 
 # Import with a custom log file
 python plex_playlist_tools.py import --file my_playlists.csv --log import_log.csv
@@ -231,7 +235,7 @@ python plex_playlist_tools.py import --file my_playlists.csv --log import_log.cs
 
 > **Tip:** Only CSVs that were exported with `--playlist` or `--all-playlists` can be imported (they must have a populated `Playlist` column). Library exports have a blank `Playlist` column and are not importable.
 
-> **Note:** On import, the tool looks for `{images-dir}/{playlist name}.jpg` (falling back to `.png`). If the file exists, it is uploaded as the playlist's cover. If a playlist already exists in Plex, it is replaced before the image is uploaded.
+> **Note:** On import, the tool looks inside the `--images-dir` directory for a file named `{playlist name}.jpg` (falling back to `.jpeg` then `.png`). If found, it is uploaded as the playlist's cover. If a playlist already exists in Plex, it is replaced before the image is uploaded.
 
 ---
 
@@ -296,23 +300,24 @@ Timestamp,Operation,Playlist,Artist,Album,Track Title,Status,Message
 ### Back up all playlists and restore them
 
 ```bash
-# Step 1 — export tracks and cover images
-python plex_playlist_tools.py export --all-playlists --output backup.csv --images-dir playlist_images
+# Step 1 — export tracks and cover images into the ./covers directory
+python plex_playlist_tools.py export --all-playlists --output backup.csv --images-dir ./covers
 
-# Step 2 — restore (e.g. after a server migration)
-python plex_playlist_tools.py import --file backup.csv --images-dir playlist_images
+# Step 2 — restore (e.g. after a server migration), reading images back from ./covers
+python plex_playlist_tools.py import --file backup.csv --images-dir ./covers
 ```
 
 ### Export all playlists with every available cover image
 
 ```bash
-python plex_playlist_tools.py export --all-playlists --images-dir playlist_images --all-images
+# All covers are saved into sub-folders inside ./covers
+python plex_playlist_tools.py export --all-playlists --images-dir ./covers --all-images
 ```
 
-This creates a sub-folder for each playlist inside `playlist_images/`:
+This creates a sub-folder for each playlist inside the `./covers` directory:
 
 ```
-playlist_images/
+covers/
   Road Trip/
     Road Trip-1-selected.jpg   ← currently active cover
     Road Trip-2.jpg
