@@ -156,8 +156,8 @@ def download_all_playlist_images(plex: PlexServer, playlist, images_dir: str) ->
     """
     Download every poster associated with a playlist into a sub-folder named
     after the playlist.  Files are named:
-        {index:02d}_{label}[_selected].{ext}
-    where label is derived from the poster's ratingKey/provider tag.
+        {playlist name}-{index}[-selected].{ext}
+    where the -selected suffix marks the currently active cover.
 
     Returns a list of result dicts with keys: path, selected, status, message.
     """
@@ -188,18 +188,8 @@ def download_all_playlist_images(plex: PlexServer, playlist, images_dir: str) ->
         thumb    = poster.get("thumb") or poster.get("key") or ""
         selected = poster.get("selected") == "1"
 
-        # Build a human-readable label from the thumb URL
-        # e.g. "/library/metadata/12345/posters/1234567890" → "local_1234567890"
-        # or   "https://assets.plex.tv/..." → "plex_tv"
-        if thumb.startswith("http"):
-            label = re.sub(r"[^a-zA-Z0-9_-]", "_", thumb.split("/")[-1])[:40] or f"remote_{i}"
-        else:
-            parts = [p for p in thumb.split("/") if p]
-            label = f"{parts[-2]}_{parts[-1]}" if len(parts) >= 2 else f"poster_{i}"
-        label = sanitize_filename(label)
-
-        suffix = "_selected" if selected else ""
-        filename = f"{i:02d}_{label}{suffix}"
+        suffix   = "-selected" if selected else ""
+        filename = f"{safe_name}-{i}{suffix}"
 
         url = thumb if thumb.startswith("http") else f"{plex._baseurl}{thumb}"
         try:

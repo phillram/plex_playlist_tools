@@ -193,8 +193,8 @@ python plex_playlist_tools.py export --all-playlists --output my_playlists.csv -
 > - `--images-dir` alone saves **one file** per playlist — the currently selected cover:
 >   `{images-dir}/{playlist name}.jpg`
 > - `--all-images` saves **every available cover** into a sub-folder per playlist:
->   `{images-dir}/{playlist name}/{index}_{label}[_selected].jpg`
->   The file with `_selected` in its name is the cover currently active in Plex.
+>   `{images-dir}/{playlist name}/{playlist name}-{index}[-selected].jpg`
+>   The file with `-selected` in its name is the cover currently active in Plex.
 > - Library exports (`--library`) do not support image export since they have no associated playlist artwork.
 
 ---
@@ -314,12 +314,12 @@ This creates a sub-folder for each playlist inside `playlist_images/`:
 ```
 playlist_images/
   Road Trip/
-    01_local_123456_selected.jpg   ← currently active cover
-    02_plex_tv_abc123.jpg
-    03_local_789012.jpg
+    Road Trip-1-selected.jpg   ← currently active cover
+    Road Trip-2.jpg
+    Road Trip-3.jpg
   Chill Mix/
-    01_local_456789_selected.jpg
-    02_plex_tv_def456.jpg
+    Chill Mix-1-selected.jpg
+    Chill Mix-2.jpg
 ```
 
 ### Export one playlist and check the log for issues
