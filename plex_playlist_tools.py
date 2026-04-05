@@ -102,12 +102,43 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
 
 
+def get_selected_poster_url(plex: PlexServer, playlist) -> str | None:
+    """
+    Query /library/metadata/{ratingKey}/posters and return the relative URL of
+    whichever poster is currently selected (custom or auto-generated composite).
+    Falls back to playlist.thumb if the endpoint is unavailable.
+    """
+    posters_url = f"{plex._baseurl}/library/metadata/{playlist.ratingKey}/posters"
+    try:
+        resp = plex._session.get(
+            posters_url, params={"X-Plex-Token": plex._token}, timeout=15
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        # Find the poster marked selected="1" first, then fall back to the first listed
+        posters = root.findall("Photo")
+        selected = next((p for p in posters if p.get("selected") == "1"), None)
+        if selected is None:
+            selected = posters[0] if posters else None
+        if selected is not None:
+            return selected.get("thumb") or selected.get("key")
+    except Exception:
+        pass
+    # Last resort: use the composite thumb Plex exposes on the object itself
+    return getattr(playlist, "thumb", None) or None
+
+
 def download_playlist_image(plex: PlexServer, playlist, images_dir: str) -> str | None:
-    """Download the playlist thumbnail. Returns the saved file path, or None on failure."""
-    if not getattr(playlist, "thumb", None):
+    """
+    Download the currently selected poster for a playlist (custom image if one
+    has been set, otherwise the auto-generated composite).
+    Returns the saved file path, or None on failure.
+    """
+    poster_path = get_selected_poster_url(plex, playlist)
+    if not poster_path:
         return None
     os.makedirs(images_dir, exist_ok=True)
-    url = f"{plex._baseurl}{playlist.thumb}"
+    url = f"{plex._baseurl}{poster_path}"
     try:
         resp = plex._session.get(url, params={"X-Plex-Token": plex._token}, timeout=15)
         resp.raise_for_status()
@@ -117,7 +148,7 @@ def download_playlist_image(plex: PlexServer, playlist, images_dir: str) -> str 
         with open(path, "wb") as f:
             f.write(resp.content)
         return path
-    except Exception as e:
+    except Exception:
         return None
 
 
