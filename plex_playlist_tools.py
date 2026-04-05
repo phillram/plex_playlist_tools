@@ -152,6 +152,75 @@ def download_playlist_image(plex: PlexServer, playlist, images_dir: str) -> str 
         return None
 
 
+def download_all_playlist_images(plex: PlexServer, playlist, images_dir: str) -> list[dict]:
+    """
+    Download every poster associated with a playlist into a sub-folder named
+    after the playlist.  Files are named:
+        {index:02d}_{label}[_selected].{ext}
+    where label is derived from the poster's ratingKey/provider tag.
+
+    Returns a list of result dicts with keys: path, selected, status, message.
+    """
+    safe_name   = sanitize_filename(playlist.title)
+    dest_dir    = os.path.join(images_dir, safe_name)
+    posters_url = f"{plex._baseurl}/library/metadata/{playlist.ratingKey}/posters"
+
+    results = []
+
+    try:
+        resp = plex._session.get(
+            posters_url, params={"X-Plex-Token": plex._token}, timeout=15
+        )
+        resp.raise_for_status()
+        root    = ET.fromstring(resp.content)
+        posters = root.findall("Photo")
+    except Exception as e:
+        return [{"path": None, "selected": False, "status": "error",
+                 "message": f"Could not fetch poster list: {e}"}]
+
+    if not posters:
+        return [{"path": None, "selected": False, "status": "skipped",
+                 "message": "No posters found"}]
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    for i, poster in enumerate(posters, 1):
+        thumb    = poster.get("thumb") or poster.get("key") or ""
+        selected = poster.get("selected") == "1"
+
+        # Build a human-readable label from the thumb URL
+        # e.g. "/library/metadata/12345/posters/1234567890" → "local_1234567890"
+        # or   "https://assets.plex.tv/..." → "plex_tv"
+        if thumb.startswith("http"):
+            label = re.sub(r"[^a-zA-Z0-9_-]", "_", thumb.split("/")[-1])[:40] or f"remote_{i}"
+        else:
+            parts = [p for p in thumb.split("/") if p]
+            label = f"{parts[-2]}_{parts[-1]}" if len(parts) >= 2 else f"poster_{i}"
+        label = sanitize_filename(label)
+
+        suffix = "_selected" if selected else ""
+        filename = f"{i:02d}_{label}{suffix}"
+
+        url = thumb if thumb.startswith("http") else f"{plex._baseurl}{thumb}"
+        try:
+            img_resp = plex._session.get(
+                url, params={"X-Plex-Token": plex._token}, timeout=15
+            )
+            img_resp.raise_for_status()
+            content_type = img_resp.headers.get("Content-Type", "image/jpeg")
+            ext  = "png" if "png" in content_type else "jpg"
+            path = os.path.join(dest_dir, f"{filename}.{ext}")
+            with open(path, "wb") as f:
+                f.write(img_resp.content)
+            results.append({"path": path, "selected": selected,
+                             "status": "success", "message": ""})
+        except Exception as e:
+            results.append({"path": None, "selected": selected,
+                             "status": "error", "message": str(e)})
+
+    return results
+
+
 def upload_playlist_image(plex: PlexServer, playlist, images_dir: str) -> bool:
     """Upload a saved thumbnail to a playlist. Returns True on success, False if no file found."""
     safe_name = sanitize_filename(playlist.title)
@@ -264,7 +333,8 @@ def export_library(plex: PlexServer, library_name: str | None,
 
 
 def export_playlists(plex: PlexServer, playlist_names: list | None,
-                     output_file: str, log_file: str, images_dir: str | None = None):
+                     output_file: str, log_file: str,
+                     images_dir: str | None = None, all_images: bool = False):
     all_playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
     if not all_playlists:
         print("No music playlists found on this Plex server.")
@@ -311,7 +381,23 @@ def export_playlists(plex: PlexServer, playlist_names: list | None,
                 "export", playlist.title, artist, album, track.title, "success"
             ))
 
-        if images_dir:
+        if images_dir and all_images:
+            results = download_all_playlist_images(plex, playlist, images_dir)
+            ok_count = sum(1 for r in results if r["status"] == "success")
+            print(f"    Images: {ok_count}/{len(results)} downloaded → {images_dir}/{sanitize_filename(playlist.title)}/")
+            for r in results:
+                sel_tag = " [selected]" if r["selected"] else ""
+                if r["status"] == "success":
+                    log_rows.append(log_row(
+                        "export_image", playlist.title, "", "", "",
+                        "success", f"Saved to {r['path']}{sel_tag}"
+                    ))
+                else:
+                    log_rows.append(log_row(
+                        "export_image", playlist.title, "", "", "",
+                        r["status"], r["message"] + sel_tag
+                    ))
+        elif images_dir:
             saved_path = download_playlist_image(plex, playlist, images_dir)
             if saved_path:
                 print(f"    Image saved: {saved_path}")
@@ -330,7 +416,9 @@ def export_playlists(plex: PlexServer, playlist_names: list | None,
     write_csv(output_file, EXPORT_FIELDS, rows)
     append_log(log_file, log_rows)
     print(f"Data : {output_file}")
-    if images_dir:
+    if images_dir and all_images:
+        print(f"Images: {images_dir}/<playlist name>/  (all covers)")
+    elif images_dir:
         print(f"Images: {images_dir}/")
     print(f"Log  : {log_file}")
 
@@ -532,6 +620,8 @@ def main():
                      help=f"Log CSV file (default: {default_log})")
     exp.add_argument("--images-dir", default=default_imgs, metavar="DIR",
                      help="Directory to save playlist cover images (skipped if not set)")
+    exp.add_argument("--all-images", action="store_true",
+                     help="Download every available cover for each playlist, not just the selected one (requires --images-dir)")
 
     # ── import ──
     imp = sub.add_parser("import", help="Import playlists from a CSV into Plex")
@@ -568,10 +658,14 @@ def main():
 
     if args.command == "export":
         images_dir = getattr(args, "images_dir", None)
+        all_images = getattr(args, "all_images", False)
+        if all_images and not images_dir:
+            print("Error: --all-images requires --images-dir to be set.")
+            sys.exit(1)
         if args.playlist:
-            export_playlists(plex, args.playlist, args.output, args.log, images_dir)
+            export_playlists(plex, args.playlist, args.output, args.log, images_dir, all_images)
         elif args.all_playlists:
-            export_playlists(plex, None, args.output, args.log, images_dir)
+            export_playlists(plex, None, args.output, args.log, images_dir, all_images)
         else:
             export_library(plex, library_name, args.output, args.log)
 

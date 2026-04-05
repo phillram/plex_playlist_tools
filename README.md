@@ -154,11 +154,12 @@ Exports music data to a CSV file. Three modes are available:
 
 **Flags:**
 
-| Flag            | Default                    | Description                                              |
-|-----------------|----------------------------|----------------------------------------------------------|
-| `--output`      | `OUTPUT_FILE` from `.env`  | Path for the output CSV                                  |
-| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                     |
-| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to save cover images (skipped if not provided) |
+| Flag            | Default                    | Description                                                                    |
+|-----------------|----------------------------|--------------------------------------------------------------------------------|
+| `--output`      | `OUTPUT_FILE` from `.env`  | Path for the output CSV                                                        |
+| `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV                                                           |
+| `--images-dir`  | `IMAGES_DIR` from `.env`   | Directory to save cover images (skipped if not provided)                       |
+| `--all-images`  | off                        | Download every available cover per playlist, not just the selected one. Requires `--images-dir` |
 
 **Examples:**
 
@@ -175,14 +176,26 @@ python plex_playlist_tools.py export --playlist "Road Trip" "Chill Mix" "Workout
 # Export all playlists
 python plex_playlist_tools.py export --all-playlists
 
-# Export all playlists including their cover images
+# Export all playlists with the currently selected cover image
 python plex_playlist_tools.py export --all-playlists --images-dir playlist_images
+
+# Export all playlists with every available cover image (custom + auto-generated)
+python plex_playlist_tools.py export --all-playlists --images-dir playlist_images --all-images
+
+# Export a single playlist with all its covers
+python plex_playlist_tools.py export --playlist "Road Trip" --images-dir playlist_images --all-images
 
 # Export with custom output filenames
 python plex_playlist_tools.py export --all-playlists --output my_playlists.csv --log my_log.csv
 ```
 
-> **Note:** Images are saved as `{images-dir}/{playlist name}.jpg` (or `.png`). Library exports (`--library`) do not support image export since they have no associated playlist artwork.
+> **Note on image saving:**
+> - `--images-dir` alone saves **one file** per playlist — the currently selected cover:
+>   `{images-dir}/{playlist name}.jpg`
+> - `--all-images` saves **every available cover** into a sub-folder per playlist:
+>   `{images-dir}/{playlist name}/{index}_{label}[_selected].jpg`
+>   The file with `_selected` in its name is the cover currently active in Plex.
+> - Library exports (`--library`) do not support image export since they have no associated playlist artwork.
 
 ---
 
@@ -288,6 +301,25 @@ python plex_playlist_tools.py export --all-playlists --output backup.csv --image
 
 # Step 2 — restore (e.g. after a server migration)
 python plex_playlist_tools.py import --file backup.csv --images-dir playlist_images
+```
+
+### Export all playlists with every available cover image
+
+```bash
+python plex_playlist_tools.py export --all-playlists --images-dir playlist_images --all-images
+```
+
+This creates a sub-folder for each playlist inside `playlist_images/`:
+
+```
+playlist_images/
+  Road Trip/
+    01_local_123456_selected.jpg   ← currently active cover
+    02_plex_tv_abc123.jpg
+    03_local_789012.jpg
+  Chill Mix/
+    01_local_456789_selected.jpg
+    02_plex_tv_def456.jpg
 ```
 
 ### Export one playlist and check the log for issues
