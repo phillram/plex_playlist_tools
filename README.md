@@ -216,15 +216,22 @@ Reads a previously exported CSV and recreates the playlists in Plex. Tracks are 
 | `--file`        | `IMPORT_FILE` from `.env`  | Path to the CSV file to import from                                                      |
 | `--log`         | `LOG_FILE` from `.env`     | Path for the log CSV file                                                                |
 | `--images-dir`  | `IMAGES_DIR` from `.env`   | Path to the directory containing exported cover images to restore. Skipped if not provided. |
+| `--mode`        | `replace`                  | `replace`: delete and recreate the playlist. `append`: add only tracks not already in the playlist. |
 
 **Examples:**
 
 ```bash
-# Import using the default file (plex_music_export.csv)
+# Import using the default file and replace existing playlists (default behaviour)
 python plex_playlist_tools.py import
 
 # Import from a specific file
 python plex_playlist_tools.py import --file my_playlists.csv
+
+# Append new tracks to existing playlists instead of replacing them
+python plex_playlist_tools.py import --file my_playlists.csv --mode append
+
+# Replace existing playlists explicitly
+python plex_playlist_tools.py import --file my_playlists.csv --mode replace
 
 # Import with cover images restored from a directory
 python plex_playlist_tools.py import --file my_playlists.csv --images-dir ./covers
@@ -235,7 +242,11 @@ python plex_playlist_tools.py import --file my_playlists.csv --log import_log.cs
 
 > **Tip:** Only CSVs that were exported with `--playlist` or `--all-playlists` can be imported (they must have a populated `Playlist` column). Library exports have a blank `Playlist` column and are not importable.
 
-> **Note:** On import, the tool looks inside the `--images-dir` directory for a file named `{playlist name}.jpg` (falling back to `.jpeg` then `.png`). If found, it is uploaded as the playlist's cover. If a playlist already exists in Plex, it is replaced before the image is uploaded.
+> **Note on `--mode`:**
+> - `replace` (default): the existing playlist is deleted and recreated from the CSV. The cover image is also re-uploaded if `--images-dir` is set.
+> - `append`: only tracks not already in the playlist are added. Duplicate tracks are skipped and logged as `skipped`. If the playlist does not exist yet, it is created. Cover image upload is skipped in append mode.
+
+> **Note on images:** The tool looks inside the `--images-dir` directory for a file named `{playlist name}.jpg` (falling back to `.jpeg` then `.png`). If found, it is uploaded as the playlist's cover.
 
 ---
 

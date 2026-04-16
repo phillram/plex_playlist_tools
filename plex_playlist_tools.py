@@ -444,7 +444,8 @@ def build_track_index(library) -> tuple[dict, dict]:
 
 
 def import_playlists(plex: PlexServer, library_name: str | None,
-                     input_file: str, log_file: str, images_dir: str | None = None):
+                     input_file: str, log_file: str,
+                     images_dir: str | None = None, mode: str = "replace"):
     try:
         with open(input_file, newline="", encoding="utf-8") as f:
             csv_rows = list(csv.DictReader(f))
@@ -513,15 +514,35 @@ def import_playlists(plex: PlexServer, library_name: str | None,
                 print(f"  [MISS] {artist} – {title}")
 
         if matched:
-            # Replace existing playlist if it exists
-            new_playlist = None
-            for existing in plex.playlists():
-                if existing.title == playlist_name:
-                    existing.delete()
+            existing_playlist = next(
+                (p for p in plex.playlists() if p.title == playlist_name), None
+            )
+
+            if mode == "append" and existing_playlist:
+                existing_keys = {t.ratingKey for t in existing_playlist.items()}
+                new_tracks = [t for t in matched if t.ratingKey not in existing_keys]
+                duplicates  = len(matched) - len(new_tracks)
+                for t in matched:
+                    if t.ratingKey in existing_keys:
+                        log_rows.append(log_row(
+                            "import", playlist_name,
+                            t.grandparentTitle, t.parentTitle, t.title,
+                            "skipped", "Already in playlist"
+                        ))
+                if new_tracks:
+                    existing_playlist.addItems(new_tracks)
+                    print(f"  Appended {len(new_tracks)} track(s) to '{playlist_name}' "
+                          f"({duplicates} already present, {failed} not found)")
+                else:
+                    print(f"  Nothing to append to '{playlist_name}' "
+                          f"(all {duplicates} track(s) already present)")
+                new_playlist = existing_playlist
+            else:
+                if existing_playlist:
+                    existing_playlist.delete()
                     print(f"  Removed existing playlist '{playlist_name}'")
-                    break
-            new_playlist = plex.createPlaylist(playlist_name, items=matched)
-            print(f"  Created '{playlist_name}': {len(matched)} added, {failed} not found")
+                new_playlist = plex.createPlaylist(playlist_name, items=matched)
+                print(f"  Created '{playlist_name}': {len(matched)} added, {failed} not found")
 
             if images_dir and new_playlist:
                 ok = upload_playlist_image(plex, new_playlist, images_dir)
@@ -621,6 +642,9 @@ def main():
                      help=f"Log CSV file (default: {default_log})")
     imp.add_argument("--images-dir", default=default_imgs, metavar="DIR",
                      help="Directory to read playlist cover images from (skipped if not set)")
+    imp.add_argument("--mode", choices=["replace", "append"], default="replace",
+                     help="replace: delete and recreate the playlist (default); "
+                          "append: add only tracks not already in the playlist")
 
     # ── list-playlists ──
     sub.add_parser("list-playlists", help="List all music playlists on the server")
@@ -661,7 +685,7 @@ def main():
 
     elif args.command == "import":
         images_dir = getattr(args, "images_dir", None)
-        import_playlists(plex, library_name, args.file, args.log, images_dir)
+        import_playlists(plex, library_name, args.file, args.log, images_dir, args.mode)
 
     elif args.command == "list-playlists":
         list_playlists(plex)
