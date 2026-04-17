@@ -254,10 +254,16 @@ LOG_FIELDS = [
 
 
 def write_csv(path: str, fields: list, rows: list):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+    try:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+    except PermissionError:
+        sys.exit(
+            f"Error: cannot write to '{path}' — the file may be open in another program (e.g. Excel). "
+            "Close it and try again."
+        )
 
 
 def append_log(log_file: str, rows: list):
