@@ -260,6 +260,22 @@ LOG_FIELDS = [
 ]
 
 
+def ensure_csv_path(path: str, default_filename: str) -> str:
+    """
+    If `path` has no .csv extension (i.e. looks like a directory), append
+    `default_filename` and print a warning so the user knows what happened.
+    """
+    _, ext = os.path.splitext(path)
+    if ext.lower() != ".csv":
+        fixed = os.path.join(path, default_filename)
+        print(
+            f"Warning: '{path}' looks like a directory, not a CSV file. "
+            f"Defaulting to: {fixed}"
+        )
+        return fixed
+    return path
+
+
 def write_csv(path: str, fields: list, rows: list):
     try:
         with open(path, "w", newline="", encoding="utf-8") as f:
@@ -1515,16 +1531,18 @@ def main():
         if all_images and not images_dir:
             print("Error: --all-images requires --images-dir to be set.")
             sys.exit(1)
+        output = ensure_csv_path(args.output, default_out)
         if args.playlist:
-            export_playlists(plex, args.playlist, args.output, args.log, images_dir, all_images)
+            export_playlists(plex, args.playlist, output, args.log, images_dir, all_images)
         elif args.all_playlists:
-            export_playlists(plex, None, args.output, args.log, images_dir, all_images)
+            export_playlists(plex, None, output, args.log, images_dir, all_images)
         else:
-            export_library(plex, library_name, args.output, args.log)
+            export_library(plex, library_name, output, args.log)
 
     elif args.command == "import":
         images_dir = getattr(args, "images_dir", None)
-        import_playlists(plex, library_name, args.file, args.log, images_dir, args.mode)
+        input_file = ensure_csv_path(args.file, default_imp)
+        import_playlists(plex, library_name, input_file, args.log, images_dir, args.mode)
 
     elif args.command == "suggest":
         cmd_suggest(
