@@ -1,6 +1,6 @@
 """
 Plex Playlist Tools
-Export and import Plex music playlists and libraries.
+Export, import, and generate Plex music playlists.
 
 Usage:
   python plex_playlist_tools.py [--url URL] [--token TOKEN] <command> [options]
@@ -8,6 +8,8 @@ Usage:
 Commands:
   export          Export full library or playlist(s) to CSV
   import          Import playlists from a CSV back into Plex
+  suggest         Scan library and suggest playlists to create
+  generate        Create a playlist from a natural language description
   list-playlists  List all music playlists on the server
 
 Connection (in order of precedence):
@@ -22,7 +24,7 @@ import os
 import platform
 import re
 import sys
-import xml.etree.ElementTree as ET
+from collections import defaultdict
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -569,6 +571,429 @@ def import_playlists(plex: PlexServer, library_name: str | None,
     print(f"Log  : {log_file}")
 
 
+# ─── Playlist Generation ─────────────────────────────────────────────────────
+
+MOOD_MAP: dict[str, list[str]] = {
+    "high energy":  ["Electronic", "Dance", "Metal", "Punk", "Hard Rock",
+                     "Drum and Bass", "Hardcore", "Techno", "House", "Rave"],
+    "workout":      ["Electronic", "Dance", "Metal", "Punk", "Hard Rock",
+                     "Hip-Hop", "Drum and Bass", "Techno", "Dubstep"],
+    "party":        ["Dance", "Pop", "Hip-Hop", "Electronic", "R&B",
+                     "Disco", "House", "Funk"],
+    "chill":        ["Ambient", "Acoustic", "Lo-Fi", "Chillout", "Jazz",
+                     "New Age", "Downtempo", "Trip-Hop"],
+    "lofi":         ["Lo-Fi", "Chillhop", "Hip-Hop Beats", "Ambient",
+                     "Instrumental Hip-Hop", "Lofi"],
+    "study":        ["Ambient", "Classical", "Lo-Fi", "Instrumental",
+                     "Post-Rock", "New Age", "Chillout"],
+    "focus":        ["Ambient", "Classical", "Lo-Fi", "Instrumental",
+                     "Post-Rock", "Minimal"],
+    "sleep":        ["Ambient", "New Age", "Classical", "Acoustic",
+                     "Drone", "Meditation"],
+    "sad":          ["Blues", "Acoustic", "Folk", "Indie",
+                     "Singer-Songwriter", "Emo", "Slowcore"],
+    "happy":        ["Pop", "Reggae", "Soul", "Dance", "Ska", "Swing"],
+    "romantic":     ["Jazz", "Soul", "R&B", "Classical", "Acoustic",
+                     "Bossa Nova", "Smooth Jazz"],
+    "morning":      ["Acoustic", "Folk", "Indie Pop", "Jazz", "Pop"],
+    "night":        ["Electronic", "Jazz", "Ambient", "R&B", "Soul",
+                     "Trip-Hop", "Neo-Soul"],
+    "driving":      ["Rock", "Country", "Electronic", "Pop", "Hip-Hop",
+                     "Classic Rock"],
+    "jazz":         ["Jazz", "Bebop", "Swing", "Bossa Nova", "Smooth Jazz",
+                     "Cool Jazz", "Fusion", "Big Band"],
+    "classical":    ["Classical", "Orchestral", "Chamber", "Opera",
+                     "Baroque", "Romantic", "Symphony"],
+    "rock":         ["Rock", "Classic Rock", "Alternative Rock", "Indie Rock",
+                     "Hard Rock", "Progressive Rock", "Alternative"],
+    "pop":          ["Pop", "Indie Pop", "Synth-Pop", "Dance Pop",
+                     "Electropop", "Power Pop"],
+    "hip hop":      ["Hip-Hop", "Rap", "Hip Hop", "Trap", "R&B",
+                     "Boom Bap", "Conscious Hip-Hop"],
+    "hip-hop":      ["Hip-Hop", "Rap", "Hip Hop", "Trap", "R&B"],
+    "rap":          ["Hip-Hop", "Rap", "Trap", "Boom Bap"],
+    "electronic":   ["Electronic", "Techno", "House", "EDM", "Trance",
+                     "Ambient", "Drum and Bass", "Dubstep", "Synthwave"],
+    "country":      ["Country", "Country Pop", "Bluegrass", "Americana",
+                     "Outlaw Country"],
+    "folk":         ["Folk", "Acoustic", "Indie Folk", "Americana", "Celtic",
+                     "Singer-Songwriter"],
+    "blues":        ["Blues", "Delta Blues", "Electric Blues", "Soul Blues",
+                     "Chicago Blues"],
+    "soul":         ["Soul", "R&B", "Funk", "Neo-Soul", "Motown"],
+    "r&b":          ["R&B", "Soul", "Funk", "Neo-Soul", "Contemporary R&B"],
+    "reggae":       ["Reggae", "Ska", "Dub", "Dancehall"],
+    "metal":        ["Metal", "Heavy Metal", "Death Metal", "Black Metal",
+                     "Thrash Metal", "Doom Metal"],
+    "punk":         ["Punk", "Pop Punk", "Hardcore", "Post-Punk", "Skate Punk"],
+    "indie":        ["Indie", "Indie Rock", "Indie Pop", "Indie Folk"],
+    "alternative":  ["Alternative", "Alternative Rock", "Indie",
+                     "Post-Punk", "Grunge"],
+    "ambient":      ["Ambient", "Drone", "New Age", "Space Music",
+                     "Dark Ambient"],
+    "acoustic":     ["Acoustic", "Folk", "Singer-Songwriter", "Unplugged"],
+    "instrumental": ["Instrumental", "Ambient", "Classical", "Post-Rock",
+                     "Jazz", "Cinematic"],
+    "latin":        ["Latin", "Salsa", "Bossa Nova", "Latin Pop",
+                     "Reggaeton", "Cumbia", "Merengue"],
+    "disco":        ["Disco", "Funk", "Dance", "Nu-Disco"],
+    "funk":         ["Funk", "Soul", "R&B", "Disco", "G-Funk"],
+    "gospel":       ["Gospel", "Christian", "Contemporary Christian",
+                     "Worship"],
+    "world":        ["World Music", "African", "Celtic", "Latin", "Asian",
+                     "Middle Eastern", "World"],
+    "synthwave":    ["Synthwave", "Retrowave", "Darksynth", "Outrun",
+                     "80s Electronic"],
+    "emo":          ["Emo", "Post-Hardcore", "Screamo", "Midwest Emo"],
+    "grunge":       ["Grunge", "Alternative Rock", "Post-Grunge"],
+    "oldies":       ["Oldies", "Classic Rock", "Doo-Wop", "Classic Pop"],
+}
+
+DECADE_KEYWORDS: dict[str, tuple[int, int]] = {
+    "60s":    (1960, 1969), "sixties":   (1960, 1969),
+    "70s":    (1970, 1979), "seventies": (1970, 1979),
+    "80s":    (1980, 1989), "eighties":  (1980, 1989),
+    "90s":    (1990, 1999), "nineties":  (1990, 1999),
+    "2000s":  (2000, 2009), "noughties": (2000, 2009),
+    "2010s":  (2010, 2019),
+    "2020s":  (2020, 2029),
+}
+
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "that", "this", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "some", "like", "give", "make",
+    "want", "need", "please", "create", "playlist", "music", "songs", "tracks",
+    "play", "me", "my", "all", "new", "from", "good", "great", "best", "top",
+    "mix", "list", "based", "kind", "type", "style", "genre", "about", "more",
+    "just", "only", "really", "something", "anything", "everything",
+})
+
+
+def _genre_matches(track_genres: list[str], targets: list[str]) -> bool:
+    """Case-insensitive substring match between a track's genre list and a target list."""
+    for tg in track_genres:
+        tgl = tg.lower()
+        for target in targets:
+            tl = target.lower()
+            if tl in tgl or tgl in tl:
+                return True
+    return False
+
+
+def scan_library(library) -> list[dict]:
+    """
+    Traverse artist → album → track and return lightweight metadata dicts,
+    each holding the Track object plus the metadata needed for suggestions.
+    """
+    print("Scanning library...")
+    data: list[dict] = []
+    artists = library.all()
+    total = len(artists)
+    for i, artist in enumerate(artists, 1):
+        print(f"  [{i}/{total}] {artist.title}                    ", end="\r")
+        genres = [g.tag for g in (artist.genres or [])]
+        for album in artist.albums():
+            for track in album.tracks():
+                data.append({
+                    "obj":    track,
+                    "artist": artist.title,
+                    "album":  album.title,
+                    "year":   album.year,
+                    "title":  track.title,
+                    "genres": genres,
+                })
+    print(f"\nScanned {len(data)} tracks across {total} artists.")
+    return data
+
+
+def build_suggestions(
+    track_data: list[dict],
+    min_tracks: int = 10,
+    min_artist_tracks: int = 20,
+) -> list[dict]:
+    """
+    Analyse track metadata and return a deduplicated, ranked list of
+    playlist suggestions. Each entry: {name, description, tracks, category}.
+    """
+    suggestions: list[dict] = []
+
+    # ── 1. Mood playlists ─────────────────────────────────────────────────────
+    for mood, mood_genres in MOOD_MAP.items():
+        matched = [t for t in track_data if _genre_matches(t["genres"], mood_genres)]
+        if len(matched) >= min_tracks:
+            preview = ", ".join(mood_genres[:3])
+            suffix  = "…" if len(mood_genres) > 3 else ""
+            suggestions.append({
+                "name":        f"{mood.title()} Mix",
+                "description": f"{len(matched)} tracks — {preview}{suffix}",
+                "tracks":      [t["obj"] for t in matched],
+                "category":    "mood",
+            })
+
+    # ── 2. Genre playlists ────────────────────────────────────────────────────
+    genre_bucket: dict = defaultdict(list)
+    for t in track_data:
+        for g in t["genres"]:
+            genre_bucket[g].append(t)
+
+    for genre, tracks in sorted(genre_bucket.items(), key=lambda x: -len(x[1])):
+        if len(tracks) >= min_tracks:
+            suggestions.append({
+                "name":        genre,
+                "description": f"{len(tracks)} tracks",
+                "tracks":      [t["obj"] for t in tracks],
+                "category":    "genre",
+            })
+
+    # ── 3. Decade playlists ───────────────────────────────────────────────────
+    decade_bucket: dict = defaultdict(list)
+    for t in track_data:
+        if t["year"]:
+            decade_bucket[(t["year"] // 10) * 10].append(t)
+
+    for decade in sorted(decade_bucket):
+        tracks = decade_bucket[decade]
+        if len(tracks) >= min_tracks:
+            suggestions.append({
+                "name":        f"{decade}s Hits",
+                "description": f"{len(tracks)} tracks from {decade}–{decade + 9}",
+                "tracks":      [t["obj"] for t in tracks],
+                "category":    "decade",
+            })
+
+    # ── 4. Decade + Genre combos (top 20 by count) ───────────────────────────
+    dg_bucket: dict = defaultdict(list)
+    for t in track_data:
+        if t["year"]:
+            d = (t["year"] // 10) * 10
+            for g in t["genres"]:
+                dg_bucket[(d, g)].append(t)
+
+    for (decade, genre), tracks in sorted(
+        dg_bucket.items(), key=lambda x: -len(x[1])
+    )[:20]:
+        if len(tracks) >= min_tracks:
+            suggestions.append({
+                "name":        f"{decade}s {genre}",
+                "description": f"{len(tracks)} {genre} tracks from {decade}–{decade + 9}",
+                "tracks":      [t["obj"] for t in tracks],
+                "category":    "decade + genre",
+            })
+
+    # ── 5. Artist "Best Of" ───────────────────────────────────────────────────
+    artist_bucket: dict = defaultdict(list)
+    for t in track_data:
+        artist_bucket[t["artist"]].append(t)
+
+    for artist, tracks in sorted(artist_bucket.items(), key=lambda x: -len(x[1])):
+        if len(tracks) >= min_artist_tracks:
+            suggestions.append({
+                "name":        f"Best of {artist}",
+                "description": f"All {len(tracks)} tracks by {artist}",
+                "tracks":      [t["obj"] for t in tracks],
+                "category":    "artist",
+            })
+
+    # Deduplicate names, sort by track count descending
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for s in sorted(suggestions, key=lambda x: -len(x["tracks"])):
+        if s["name"] not in seen:
+            seen.add(s["name"])
+            unique.append(s)
+    return unique
+
+
+def find_tracks_for_prompt(
+    prompt: str, track_data: list[dict]
+) -> tuple[list, list[str]]:
+    """
+    Parse a natural language description and return matching Track objects
+    plus a list of human-readable criteria labels explaining the match.
+    """
+    prompt_lower = prompt.lower()
+    criteria: list[str] = []
+
+    # 1. Decade keywords
+    decade_range: tuple[int, int] | None = None
+    for kw, (start, end) in DECADE_KEYWORDS.items():
+        if re.search(rf'\b{re.escape(kw)}\b', prompt_lower):
+            decade_range = (start, end)
+            criteria.append(f"decade: {start}s")
+            break
+
+    # 2. Mood / genre keywords from the map
+    target_genres: set[str] = set()
+    for kw, genres in MOOD_MAP.items():
+        if re.search(rf'\b{re.escape(kw)}\b', prompt_lower):
+            target_genres.update(g.lower() for g in genres)
+            criteria.append(f"keyword: '{kw}'")
+
+    # 3. Direct word matching against library genre tags
+    if not target_genres and not decade_range:
+        words = [
+            w for w in re.findall(r'[a-z]+', prompt_lower)
+            if len(w) >= 4 and w not in _STOP_WORDS
+        ]
+        direct: set[str] = set()
+        for t in track_data:
+            for g in t["genres"]:
+                if any(w in g.lower() for w in words):
+                    direct.add(g)
+        if direct:
+            target_genres = {g.lower() for g in direct}
+            criteria.append(f"genre match: {', '.join(sorted(direct)[:4])}")
+
+    # 4. Artist name matching as final fallback
+    if not target_genres and not decade_range:
+        words = [
+            w for w in re.findall(r'[a-z]+', prompt_lower)
+            if len(w) >= 3 and w not in _STOP_WORDS
+        ]
+        artist_hits: set[str] = set()
+        for t in track_data:
+            if any(w in t["artist"].lower() for w in words):
+                artist_hits.add(t["artist"])
+        if artist_hits:
+            criteria.append(f"artist: {', '.join(sorted(artist_hits)[:4])}")
+            return [t["obj"] for t in track_data if t["artist"] in artist_hits], criteria
+
+    if not target_genres and not decade_range:
+        return [], criteria
+
+    matching: list = []
+    for t in track_data:
+        if decade_range:
+            if not t["year"] or not (decade_range[0] <= t["year"] <= decade_range[1]):
+                continue
+        if target_genres and not _genre_matches(t["genres"], list(target_genres)):
+            continue
+        matching.append(t["obj"])
+
+    return matching, criteria
+
+
+def _create_or_replace_playlist(
+    plex: PlexServer, name: str, tracks: list, log_rows: list
+) -> None:
+    """Delete any existing playlist with this name then create a fresh one."""
+    for existing in plex.playlists():
+        if existing.title == name:
+            existing.delete()
+            break
+    plex.createPlaylist(name, items=tracks)
+    log_rows.append(log_row("generate", name, "", "", "", "success",
+                             f"Created with {len(tracks)} tracks"))
+
+
+def cmd_suggest(
+    plex: PlexServer,
+    library_name: str | None,
+    min_tracks: int,
+    min_artist_tracks: int,
+    limit: int,
+    create_all: bool,
+    log_file: str,
+) -> None:
+    library         = find_music_library(plex, library_name)
+    track_data      = scan_library(library)
+    all_suggestions = build_suggestions(track_data, min_tracks, min_artist_tracks)
+
+    if not all_suggestions:
+        print("No suggestions generated — try lowering --min-tracks.")
+        return
+
+    display = all_suggestions[:limit]
+    cat_w   = max(len(s["category"]) for s in display)
+    print(f"\n{len(all_suggestions)} suggestion(s) found. Showing top {len(display)}:\n")
+    for i, s in enumerate(display, 1):
+        cat = f"[{s['category']}]".ljust(cat_w + 2)
+        print(f"  [{i:>2}]  {cat}  {s['name']:<42}  {s['description']}")
+
+    if create_all:
+        chosen = display
+    else:
+        print(
+            "\nEnter number(s) to create (e.g. 1  or  1,3,5  or  all), "
+            "or 'q' to quit:"
+        )
+        raw = input("> ").strip().lower()
+        if raw in ("q", "quit", ""):
+            print("Cancelled.")
+            return
+        if raw == "all":
+            chosen = display
+        else:
+            try:
+                indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip()]
+                chosen  = [display[j] for j in indices if 0 <= j < len(display)]
+            except ValueError:
+                print("Invalid input — enter numbers separated by commas.")
+                return
+
+    if not chosen:
+        print("Nothing selected.")
+        return
+
+    log_rows: list[dict] = []
+    for s in chosen:
+        _create_or_replace_playlist(plex, s["name"], s["tracks"], log_rows)
+        print(f"  Created '{s['name']}' ({len(s['tracks'])} tracks)")
+
+    append_log(log_file, log_rows)
+    print(f"\nCreated {len(chosen)} playlist(s).")
+    print(f"Log  : {log_file}")
+
+
+def cmd_generate(
+    plex: PlexServer,
+    library_name: str | None,
+    prompt: str,
+    playlist_name: str | None,
+    min_tracks: int,
+    yes: bool,
+    log_file: str,
+) -> None:
+    library    = find_music_library(plex, library_name)
+    track_data = scan_library(library)
+
+    print(f'\nSearching for: "{prompt}"')
+    tracks, criteria = find_tracks_for_prompt(prompt, track_data)
+
+    if criteria:
+        print("Matched on:")
+        for c in criteria:
+            print(f"  · {c}")
+
+    if not tracks:
+        print(
+            "\nNo matching tracks found.\n"
+            "Tips: try different keywords, check your library's genre tags,\n"
+            "      or run 'suggest' to see what your library can support."
+        )
+        return
+
+    name = playlist_name or prompt.strip().title()
+    print(f"\nFound {len(tracks)} track(s)  →  playlist name: '{name}'")
+
+    if len(tracks) < min_tracks:
+        print(f"Warning: only {len(tracks)} track(s) found (--min-tracks is {min_tracks}).")
+
+    if not yes:
+        raw = input(f"\nCreate '{name}' with {len(tracks)} tracks? [y/N] ").strip().lower()
+        if raw not in ("y", "yes"):
+            print("Cancelled.")
+            return
+
+    log_rows: list[dict] = []
+    _create_or_replace_playlist(plex, name, tracks, log_rows)
+    append_log(log_file, log_rows)
+    print(f"Created playlist '{name}' with {len(tracks)} tracks.")
+    print(f"Log  : {log_file}")
+
+
 # ─── List playlists ───────────────────────────────────────────────────────────
 
 def list_playlists(plex: PlexServer):
@@ -642,9 +1067,38 @@ def main():
                      help=f"Log CSV file (default: {default_log})")
     imp.add_argument("--images-dir", default=default_imgs, metavar="DIR",
                      help="Directory to read playlist cover images from (skipped if not set)")
-    imp.add_argument("--mode", choices=["replace", "append"], default="replace",
-                     help="replace: delete and recreate the playlist (default); "
-                          "append: add only tracks not already in the playlist")
+    imp.add_argument("--mode", choices=["replace", "append"], default="append",
+                     help="append: add only tracks not already in the playlist (default); "
+                          "replace: delete and recreate the playlist")
+
+    # ── suggest ──
+    sug = sub.add_parser("suggest",
+                         help="Scan library and suggest playlists to create interactively")
+    sug.add_argument("--min-tracks",        type=int, default=10, metavar="N",
+                     help="Minimum tracks for a suggestion to appear (default: 10)")
+    sug.add_argument("--min-artist-tracks", type=int, default=20, metavar="N",
+                     help="Minimum tracks by one artist for a 'Best of' suggestion (default: 20)")
+    sug.add_argument("--limit",             type=int, default=25, metavar="N",
+                     help="Maximum number of suggestions to display (default: 25)")
+    sug.add_argument("--create-all",        action="store_true",
+                     help="Create every suggestion without prompting")
+    sug.add_argument("--log",               default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
+    # ── generate ──
+    gen = sub.add_parser("generate",
+                         help="Create a playlist from a natural language description")
+    gen.add_argument("prompt", metavar="DESCRIPTION",
+                     help="What kind of playlist you want "
+                          "(e.g. 'chill lo-fi for studying' or '90s rock')")
+    gen.add_argument("--name",       metavar="NAME",
+                     help="Playlist name (defaults to the description)")
+    gen.add_argument("--min-tracks", type=int, default=5, metavar="N",
+                     help="Warn if fewer than this many tracks are found (default: 5)")
+    gen.add_argument("--yes", "-y",  action="store_true",
+                     help="Skip confirmation and create the playlist immediately")
+    gen.add_argument("--log",        default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
 
     # ── list-playlists ──
     sub.add_parser("list-playlists", help="List all music playlists on the server")
@@ -686,6 +1140,20 @@ def main():
     elif args.command == "import":
         images_dir = getattr(args, "images_dir", None)
         import_playlists(plex, library_name, args.file, args.log, images_dir, args.mode)
+
+    elif args.command == "suggest":
+        cmd_suggest(
+            plex, library_name,
+            args.min_tracks, args.min_artist_tracks,
+            args.limit, args.create_all, args.log,
+        )
+
+    elif args.command == "generate":
+        cmd_generate(
+            plex, library_name,
+            args.prompt, args.name,
+            args.min_tracks, args.yes, args.log,
+        )
 
     elif args.command == "list-playlists":
         list_playlists(plex)
