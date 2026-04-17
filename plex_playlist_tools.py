@@ -1523,6 +1523,15 @@ def main():
         print("Find your token: https://support.plex.tv/articles/204059436")
         sys.exit(1)
 
+    # Normalise all CSV file paths — warn and append default filename if a
+    # directory path was given instead of a .csv filename.
+    if hasattr(args, "output"):
+        args.output = ensure_csv_path(args.output, default_out)
+    if hasattr(args, "file"):
+        args.file = ensure_csv_path(args.file, default_imp)
+    if hasattr(args, "log"):
+        args.log = ensure_csv_path(args.log, default_log)
+
     plex = get_plex_server(base_url, token)
 
     if args.command == "export":
@@ -1531,18 +1540,16 @@ def main():
         if all_images and not images_dir:
             print("Error: --all-images requires --images-dir to be set.")
             sys.exit(1)
-        output = ensure_csv_path(args.output, default_out)
         if args.playlist:
-            export_playlists(plex, args.playlist, output, args.log, images_dir, all_images)
+            export_playlists(plex, args.playlist, args.output, args.log, images_dir, all_images)
         elif args.all_playlists:
-            export_playlists(plex, None, output, args.log, images_dir, all_images)
+            export_playlists(plex, None, args.output, args.log, images_dir, all_images)
         else:
-            export_library(plex, library_name, output, args.log)
+            export_library(plex, library_name, args.output, args.log)
 
     elif args.command == "import":
         images_dir = getattr(args, "images_dir", None)
-        input_file = ensure_csv_path(args.file, default_imp)
-        import_playlists(plex, library_name, input_file, args.log, images_dir, args.mode)
+        import_playlists(plex, library_name, args.file, args.log, images_dir, args.mode)
 
     elif args.command == "suggest":
         cmd_suggest(
