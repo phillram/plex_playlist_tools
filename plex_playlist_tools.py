@@ -825,10 +825,13 @@ def build_suggestions(
                 "category":    "artist",
             })
 
-    # Deduplicate names, sort by track count descending
+    # Deduplicate, then sort: category group first, track count descending within each group.
+    # Artist "Best of" playlists always appear last.
+    _CAT_ORDER = {"mood": 0, "genre": 1, "decade": 2, "decade + genre": 3, "artist": 4}
     seen: set[str] = set()
     unique: list[dict] = []
-    for s in sorted(suggestions, key=lambda x: -len(x["tracks"])):
+    for s in sorted(suggestions,
+                    key=lambda x: (_CAT_ORDER.get(x["category"], 99), -len(x["tracks"]))):
         if s["name"] not in seen:
             seen.add(s["name"])
             unique.append(s)
