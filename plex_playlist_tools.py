@@ -11,6 +11,11 @@ Commands:
   suggest         Scan library and suggest playlists to create
   generate        Create a playlist from a natural language description
   list-playlists  List all music playlists on the server
+  dedupe          Find and remove duplicate tracks from playlist(s)
+  shuffle         Create a shuffled copy of a playlist
+  sync            Mirror playlist(s) from this server to another Plex server
+  rename          Rename a playlist
+  merge           Combine multiple playlists into one
 
 Connection (in order of precedence):
   1. --url / --token CLI flags
@@ -22,8 +27,10 @@ import argparse
 import csv
 import os
 import platform
+import random
 import re
 import sys
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
 
@@ -1000,6 +1007,314 @@ def cmd_generate(
     print(f"Log  : {log_file}")
 
 
+# ─── Dedupe ───────────────────────────────────────────────────────────────────
+
+def cmd_dedupe(
+    plex: PlexServer,
+    playlist_names: list | None,
+    yes: bool,
+    log_file: str,
+) -> None:
+    all_music = [p for p in plex.playlists() if p.playlistType == "audio"]
+    if not all_music:
+        print("No music playlists found.")
+        return
+
+    if playlist_names:
+        name_set = {n.lower() for n in playlist_names}
+        targets = [p for p in all_music if p.title.lower() in name_set]
+        missing = name_set - {p.title.lower() for p in targets}
+        if missing:
+            print(f"Playlist(s) not found: {', '.join(missing)}")
+            if not targets:
+                sys.exit(1)
+    else:
+        targets = all_music
+
+    log_rows: list[dict] = []
+    total_removed = 0
+
+    for playlist in targets:
+        items = playlist.items()
+        seen_keys: set = set()
+        dupes: list = []
+        for track in items:
+            if track.ratingKey in seen_keys:
+                dupes.append(track)
+            else:
+                seen_keys.add(track.ratingKey)
+
+        if not dupes:
+            print(f"  '{playlist.title}' — no duplicates ({len(items)} tracks)")
+            continue
+
+        print(f"  '{playlist.title}' — {len(dupes)} duplicate(s) in {len(items)} tracks:")
+        for t in dupes:
+            print(f"    · {t.grandparentTitle} – {t.title}")
+
+        if not yes:
+            raw = input(
+                f"  Remove {len(dupes)} duplicate(s) from '{playlist.title}'? [y/N] "
+            ).strip().lower()
+            if raw not in ("y", "yes"):
+                print("  Skipped.")
+                continue
+
+        playlist.removeItems(dupes)
+        total_removed += len(dupes)
+        print(f"  Removed {len(dupes)} duplicate(s) from '{playlist.title}'.")
+        for t in dupes:
+            log_rows.append(log_row(
+                "dedupe", playlist.title,
+                t.grandparentTitle, t.parentTitle, t.title,
+                "success", "Duplicate removed",
+            ))
+
+    append_log(log_file, log_rows)
+    if total_removed:
+        print(f"\nRemoved {total_removed} duplicate track(s) total.")
+        print(f"Log  : {log_file}")
+    else:
+        print("\nNo duplicates found.")
+
+
+# ─── Shuffle ──────────────────────────────────────────────────────────────────
+
+def cmd_shuffle(
+    plex: PlexServer,
+    source_name: str,
+    output_name: str | None,
+    seed: int | None,
+    yes: bool,
+    log_file: str,
+) -> None:
+    all_music = [p for p in plex.playlists() if p.playlistType == "audio"]
+    source = next((p for p in all_music if p.title.lower() == source_name.lower()), None)
+    if source is None:
+        print(f"Error: Playlist '{source_name}' not found.")
+        print("Available music playlists:")
+        for p in all_music:
+            print(f"  - {p.title}")
+        sys.exit(1)
+
+    tracks = list(source.items())
+    if not tracks:
+        print(f"Playlist '{source_name}' is empty.")
+        return
+
+    rng = random.Random(seed)
+    rng.shuffle(tracks)
+
+    name = output_name or f"{source.title} (Shuffled)"
+    seed_note = f" (seed: {seed})" if seed is not None else ""
+    print(f"Shuffling '{source.title}' ({len(tracks)} tracks)  →  '{name}'{seed_note}")
+
+    if not yes:
+        raw = input(
+            f"\nCreate '{name}' with {len(tracks)} shuffled tracks? [y/N] "
+        ).strip().lower()
+        if raw not in ("y", "yes"):
+            print("Cancelled.")
+            return
+
+    for existing in plex.playlists():
+        if existing.title == name:
+            existing.delete()
+            break
+
+    plex.createPlaylist(name, items=tracks)
+    log_rows = [log_row(
+        "shuffle", name, "", "", "", "success",
+        f"Created from '{source.title}' — {len(tracks)} tracks shuffled{seed_note}",
+    )]
+    append_log(log_file, log_rows)
+    print(f"Created playlist '{name}' with {len(tracks)} tracks.")
+    print(f"Log  : {log_file}")
+
+
+# ─── Sync ─────────────────────────────────────────────────────────────────────
+
+def cmd_sync(
+    plex: PlexServer,
+    dest_plex: PlexServer,
+    dest_library_name: str | None,
+    playlist_names: list | None,
+    mode: str,
+    log_file: str,
+) -> None:
+    src_playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
+    if not src_playlists:
+        print("No music playlists found on the source server.")
+        return
+
+    if playlist_names:
+        name_set = {n.lower() for n in playlist_names}
+        targets = [p for p in src_playlists if p.title.lower() in name_set]
+        missing = name_set - {p.title.lower() for p in targets}
+        if missing:
+            print(f"Playlist(s) not found on source: {', '.join(missing)}")
+            if not targets:
+                sys.exit(1)
+    else:
+        targets = src_playlists
+
+    dest_library = find_music_library(dest_plex, dest_library_name)
+    by_path, by_artist_title = build_track_index(dest_library)
+
+    log_rows: list[dict] = []
+    total_synced = 0
+
+    for playlist in targets:
+        src_tracks = playlist.items()
+        print(f"\nSyncing '{playlist.title}' ({len(src_tracks)} tracks)...")
+
+        matched, failed = [], 0
+        for track in src_tracks:
+            artist    = track.grandparentTitle or ""
+            title     = track.title or ""
+            file_path = track.media[0].parts[0].file if track.media else ""
+
+            dest_track = by_path.get(file_path) if file_path else None
+            if not dest_track:
+                dest_track = by_artist_title.get((artist.lower(), title.lower()))
+
+            if dest_track:
+                matched.append(dest_track)
+            else:
+                failed += 1
+                log_rows.append(log_row(
+                    "sync", playlist.title, artist, track.parentTitle or "", title,
+                    "error", "Track not found on destination",
+                ))
+
+        if not matched:
+            print("  No tracks matched on destination — skipped.")
+            continue
+
+        dest_existing = next(
+            (p for p in dest_plex.playlists() if p.title == playlist.title), None
+        )
+
+        if mode == "append" and dest_existing:
+            existing_keys = {t.ratingKey for t in dest_existing.items()}
+            new_tracks = [t for t in matched if t.ratingKey not in existing_keys]
+            dupes = len(matched) - len(new_tracks)
+            if new_tracks:
+                dest_existing.addItems(new_tracks)
+                print(f"  Appended {len(new_tracks)} track(s) "
+                      f"({dupes} already present, {failed} not found)")
+            else:
+                print(f"  Nothing to append ({dupes} already present, {failed} not found)")
+        else:
+            if dest_existing:
+                dest_existing.delete()
+            dest_plex.createPlaylist(playlist.title, items=matched)
+            print(f"  Created '{playlist.title}': {len(matched)} synced, {failed} not found")
+
+        for t in matched:
+            log_rows.append(log_row(
+                "sync", playlist.title,
+                t.grandparentTitle, t.parentTitle, t.title,
+                "success", "",
+            ))
+        total_synced += len(matched)
+
+    append_log(log_file, log_rows)
+    print(f"\nSync complete: {total_synced} track(s) across {len(targets)} playlist(s).")
+    print(f"Log  : {log_file}")
+
+
+# ─── Rename ───────────────────────────────────────────────────────────────────
+
+def cmd_rename(plex: PlexServer, old_name: str, new_name: str) -> None:
+    playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
+    target = next((p for p in playlists if p.title.lower() == old_name.lower()), None)
+    if target is None:
+        print(f"Error: Playlist '{old_name}' not found.")
+        print("Available music playlists:")
+        for p in playlists:
+            print(f"  - {p.title}")
+        sys.exit(1)
+
+    conflict = next(
+        (p for p in playlists
+         if p.title.lower() == new_name.lower() and p.ratingKey != target.ratingKey),
+        None,
+    )
+    if conflict:
+        print(f"Error: A playlist named '{new_name}' already exists.")
+        sys.exit(1)
+
+    target.edit(title=new_name)
+    print(f"Renamed '{old_name}'  →  '{new_name}'.")
+
+
+# ─── Merge ────────────────────────────────────────────────────────────────────
+
+def cmd_merge(
+    plex: PlexServer,
+    source_names: list[str],
+    output_name: str,
+    allow_duplicates: bool,
+    yes: bool,
+    log_file: str,
+) -> None:
+    all_music = [p for p in plex.playlists() if p.playlistType == "audio"]
+    sources: list = []
+    for name in source_names:
+        match = next((p for p in all_music if p.title.lower() == name.lower()), None)
+        if match is None:
+            print(f"Error: Playlist '{name}' not found.")
+            print("Available music playlists:")
+            for p in all_music:
+                print(f"  - {p.title}")
+            sys.exit(1)
+        sources.append(match)
+
+    merged: list = []
+    seen_keys: set = set()
+    dupes_skipped = 0
+
+    for playlist in sources:
+        for track in playlist.items():
+            if allow_duplicates or track.ratingKey not in seen_keys:
+                merged.append(track)
+                seen_keys.add(track.ratingKey)
+            else:
+                dupes_skipped += 1
+
+    dupe_note = f" ({dupes_skipped} duplicate(s) removed)" if dupes_skipped else ""
+    print(f"Merging {len(sources)} playlist(s)  →  '{output_name}'")
+    print(f"  Sources : {', '.join(p.title for p in sources)}")
+    print(f"  Tracks  : {len(merged)}{dupe_note}")
+
+    if not merged:
+        print("No tracks to merge.")
+        return
+
+    if not yes:
+        raw = input(
+            f"\nCreate '{output_name}' with {len(merged)} tracks? [y/N] "
+        ).strip().lower()
+        if raw not in ("y", "yes"):
+            print("Cancelled.")
+            return
+
+    for existing in plex.playlists():
+        if existing.title == output_name:
+            existing.delete()
+            break
+
+    plex.createPlaylist(output_name, items=merged)
+    log_rows = [log_row(
+        "merge", output_name, "", "", "", "success",
+        f"Merged from: {', '.join(p.title for p in sources)} — {len(merged)} tracks{dupe_note}",
+    )]
+    append_log(log_file, log_rows)
+    print(f"Created '{output_name}' with {len(merged)} tracks.")
+    print(f"Log  : {log_file}")
+
+
 # ─── List playlists ───────────────────────────────────────────────────────────
 
 def list_playlists(plex: PlexServer):
@@ -1109,6 +1424,70 @@ def main():
     # ── list-playlists ──
     sub.add_parser("list-playlists", help="List all music playlists on the server")
 
+    # ── dedupe ──
+    ded = sub.add_parser("dedupe", help="Find and remove duplicate tracks from playlist(s)")
+    ded_grp = ded.add_mutually_exclusive_group(required=True)
+    ded_grp.add_argument("--playlist", metavar="NAME", nargs="+",
+                         help="Playlist(s) to deduplicate")
+    ded_grp.add_argument("--all-playlists", action="store_true",
+                         help="Deduplicate all music playlists")
+    ded.add_argument("--yes", "-y", action="store_true",
+                     help="Remove duplicates without confirmation")
+    ded.add_argument("--log", default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
+    # ── shuffle ──
+    shuf = sub.add_parser("shuffle", help="Create a shuffled copy of a playlist")
+    shuf.add_argument("playlist", metavar="PLAYLIST",
+                      help="Name of the playlist to shuffle")
+    shuf.add_argument("--name", metavar="NAME",
+                      help="Name for the new shuffled playlist (default: '<name> (Shuffled)')")
+    shuf.add_argument("--seed", type=int, metavar="N",
+                      help="Random seed for a reproducible shuffle")
+    shuf.add_argument("--yes", "-y", action="store_true",
+                      help="Skip confirmation")
+    shuf.add_argument("--log", default=default_log, metavar="FILE",
+                      help=f"Log CSV file (default: {default_log})")
+
+    # ── sync ──
+    syn = sub.add_parser("sync",
+                         help="Mirror playlist(s) from this server to another Plex server")
+    syn_grp = syn.add_mutually_exclusive_group(required=True)
+    syn_grp.add_argument("--playlist", metavar="NAME", nargs="+",
+                         help="Playlist(s) to sync")
+    syn_grp.add_argument("--all-playlists", action="store_true",
+                         help="Sync all music playlists")
+    syn.add_argument("--dest-url",     required=True, metavar="URL",
+                     help="Destination Plex server URL")
+    syn.add_argument("--dest-token",   required=True, metavar="TOKEN",
+                     help="Destination Plex auth token")
+    syn.add_argument("--dest-library", metavar="NAME",
+                     help="Music library name on destination (uses first found if blank)")
+    syn.add_argument("--mode", choices=["replace", "append"], default="replace",
+                     help="replace: recreate the playlist (default); "
+                          "append: add only new tracks")
+    syn.add_argument("--log", default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
+    # ── rename ──
+    ren = sub.add_parser("rename", help="Rename a playlist")
+    ren.add_argument("old_name", metavar="OLD_NAME", help="Current playlist name")
+    ren.add_argument("new_name", metavar="NEW_NAME", help="New playlist name")
+
+    # ── merge ──
+    mer = sub.add_parser("merge", help="Combine multiple playlists into one")
+    mer.add_argument("sources", metavar="PLAYLIST", nargs="+",
+                     help="Source playlist names to merge (two or more)")
+    mer.add_argument("--name", required=True, metavar="NAME",
+                     help="Name for the merged playlist")
+    mer.add_argument("--allow-duplicates", action="store_true",
+                     help="Keep duplicate tracks from different playlists "
+                          "(default: duplicates are removed)")
+    mer.add_argument("--yes", "-y", action="store_true",
+                     help="Skip confirmation")
+    mer.add_argument("--log", default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
     args = parser.parse_args()
 
     # ── Resolve connection settings: CLI flag > .env > auto-detect ──
@@ -1163,6 +1542,48 @@ def main():
 
     elif args.command == "list-playlists":
         list_playlists(plex)
+
+    elif args.command == "dedupe":
+        cmd_dedupe(
+            plex,
+            getattr(args, "playlist", None),
+            args.yes,
+            args.log,
+        )
+
+    elif args.command == "shuffle":
+        cmd_shuffle(
+            plex,
+            args.playlist,
+            getattr(args, "name", None),
+            getattr(args, "seed", None),
+            args.yes,
+            args.log,
+        )
+
+    elif args.command == "sync":
+        dest_plex = get_plex_server(args.dest_url, args.dest_token)
+        cmd_sync(
+            plex,
+            dest_plex,
+            getattr(args, "dest_library", None),
+            getattr(args, "playlist", None),
+            args.mode,
+            args.log,
+        )
+
+    elif args.command == "rename":
+        cmd_rename(plex, args.old_name, args.new_name)
+
+    elif args.command == "merge":
+        cmd_merge(
+            plex,
+            args.sources,
+            args.name,
+            getattr(args, "allow_duplicates", False),
+            args.yes,
+            args.log,
+        )
 
 
 if __name__ == "__main__":

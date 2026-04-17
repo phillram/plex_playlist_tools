@@ -1,6 +1,6 @@
 # Plex Playlist Tools
 
-Export, import, and generate music playlists in Plex. Works with Plex running locally or anywhere on your network.
+Export, import, and manage music playlists in Plex. Works with Plex running locally or anywhere on your network.
 
 ---
 
@@ -16,6 +16,11 @@ Export, import, and generate music playlists in Plex. Works with Plex running lo
    - [import](#import)
    - [suggest](#suggest)
    - [generate](#generate)
+   - [dedupe](#dedupe)
+   - [shuffle](#shuffle)
+   - [sync](#sync)
+   - [rename](#rename)
+   - [merge](#merge)
 6. [Output Files](#output-files)
 7. [Common Scenarios](#common-scenarios)
 
@@ -359,6 +364,200 @@ Created playlist 'Chill Lo-Fi For Studying' with 143 tracks.
 
 ---
 
+### dedupe
+
+Scans one or more playlists for duplicate tracks and removes them. A duplicate is any track that appears more than once in the same playlist (matched by Plex internal ID, so identical files are always caught).
+
+**Flags:**
+
+| Flag              | Default | Description                                              |
+|-------------------|---------|----------------------------------------------------------|
+| `--playlist NAME` | —       | One or more playlist names to deduplicate (required unless `--all-playlists`) |
+| `--all-playlists` | off     | Deduplicate every music playlist                         |
+| `--yes` / `-y`    | off     | Remove duplicates without confirmation                   |
+| `--log`           | `LOG_FILE` from `.env` | Path for the log CSV file                 |
+
+**Examples:**
+
+```bash
+# Check a single playlist for duplicates (prompts before removing)
+python plex_playlist_tools.py dedupe --playlist "Road Trip"
+
+# Check multiple playlists
+python plex_playlist_tools.py dedupe --playlist "Road Trip" "Chill Mix"
+
+# Deduplicate all playlists without prompting
+python plex_playlist_tools.py dedupe --all-playlists --yes
+```
+
+**Example output:**
+
+```
+  'Road Trip' — 3 duplicate(s) in 45 tracks:
+    · Tom Petty – American Girl
+    · Fleetwood Mac – Go Your Own Way
+    · Eagles – Hotel California
+  Remove 3 duplicate(s) from 'Road Trip'? [y/N] y
+  Removed 3 duplicate(s) from 'Road Trip'.
+
+Removed 3 duplicate track(s) total.
+```
+
+---
+
+### shuffle
+
+Creates a new playlist that is a shuffled copy of an existing one. Useful for devices or apps that play tracks in the order they appear in the playlist.
+
+**Usage:**
+
+```bash
+python plex_playlist_tools.py shuffle "PLAYLIST NAME"
+```
+
+**Flags:**
+
+| Flag          | Default                    | Description                                          |
+|---------------|----------------------------|------------------------------------------------------|
+| `--name`      | `<name> (Shuffled)`        | Name for the new shuffled playlist                   |
+| `--seed`      | —                          | Integer seed for a reproducible shuffle              |
+| `--yes` / `-y`| off                        | Skip confirmation                                    |
+| `--log`       | `LOG_FILE` from `.env`     | Path for the log CSV file                            |
+
+**Examples:**
+
+```bash
+# Shuffle a playlist (creates "Road Trip (Shuffled)")
+python plex_playlist_tools.py shuffle "Road Trip"
+
+# Shuffle with a custom name
+python plex_playlist_tools.py shuffle "Road Trip" --name "Road Trip Randomized"
+
+# Reproducible shuffle — same seed always produces the same order
+python plex_playlist_tools.py shuffle "Road Trip" --seed 42
+
+# Skip confirmation
+python plex_playlist_tools.py shuffle "Road Trip" --yes
+```
+
+> **Note:** The original playlist is not modified. A new playlist is created (or replaced if one with the same name already exists).
+
+---
+
+### sync
+
+Copies playlist(s) from one Plex server to another. Tracks are matched on the destination by file path first, then by artist + title.
+
+The source server is the one specified by the global `--url` / `--token` flags (or `.env`). The destination is specified with `--dest-url` and `--dest-token`.
+
+**Flags:**
+
+| Flag              | Default    | Description                                                              |
+|-------------------|------------|--------------------------------------------------------------------------|
+| `--playlist NAME` | —          | One or more playlist names to sync (required unless `--all-playlists`)   |
+| `--all-playlists` | off        | Sync every music playlist from the source                                |
+| `--dest-url`      | (required) | Destination Plex server URL                                              |
+| `--dest-token`    | (required) | Destination Plex auth token                                              |
+| `--dest-library`  | —          | Music library name on the destination (uses first found if blank)        |
+| `--mode`          | `replace`  | `replace`: recreate the playlist. `append`: add only new tracks.         |
+| `--log`           | `LOG_FILE` from `.env` | Path for the log CSV file                                   |
+
+**Examples:**
+
+```bash
+# Sync all playlists from one server to another
+python plex_playlist_tools.py --url http://192.168.1.10:32400 --token TOKEN_A \
+  sync --all-playlists \
+  --dest-url http://192.168.1.20:32400 --dest-token TOKEN_B
+
+# Sync a specific playlist
+python plex_playlist_tools.py --url http://192.168.1.10:32400 --token TOKEN_A \
+  sync --playlist "Road Trip" \
+  --dest-url http://192.168.1.20:32400 --dest-token TOKEN_B
+
+# Append new tracks instead of replacing
+python plex_playlist_tools.py --url http://192.168.1.10:32400 --token TOKEN_A \
+  sync --all-playlists --mode append \
+  --dest-url http://192.168.1.20:32400 --dest-token TOKEN_B
+```
+
+> **Note:** Tracks that cannot be matched on the destination are skipped and logged. The quality of matching depends on both libraries having the same file paths or consistent artist/title metadata.
+
+---
+
+### rename
+
+Renames a playlist directly on the Plex server.
+
+**Usage:**
+
+```bash
+python plex_playlist_tools.py rename "OLD NAME" "NEW NAME"
+```
+
+**Examples:**
+
+```bash
+# Rename a playlist
+python plex_playlist_tools.py rename "Road Trip" "Summer Road Trip 2024"
+
+# Works with remote servers too
+python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN \
+  rename "Chill Mix" "Evening Chill"
+```
+
+---
+
+### merge
+
+Combines two or more playlists into a single new playlist. Duplicate tracks are removed by default.
+
+**Usage:**
+
+```bash
+python plex_playlist_tools.py merge "PLAYLIST 1" "PLAYLIST 2" ... --name "MERGED NAME"
+```
+
+**Flags:**
+
+| Flag                 | Default | Description                                                              |
+|----------------------|---------|--------------------------------------------------------------------------|
+| `--name`             | (required) | Name for the merged playlist                                          |
+| `--allow-duplicates` | off     | Keep duplicate tracks from different source playlists                    |
+| `--yes` / `-y`       | off     | Skip confirmation                                                        |
+| `--log`              | `LOG_FILE` from `.env` | Path for the log CSV file                                   |
+
+**Examples:**
+
+```bash
+# Merge two playlists
+python plex_playlist_tools.py merge "Morning Vibes" "Afternoon Groove" --name "Day Mix"
+
+# Merge three playlists
+python plex_playlist_tools.py merge "Rock Classics" "90s Rock" "Indie Rock" --name "All Rock"
+
+# Merge and allow duplicate tracks
+python plex_playlist_tools.py merge "Party Mix A" "Party Mix B" --name "Big Party Mix" --allow-duplicates
+
+# Skip confirmation
+python plex_playlist_tools.py merge "Morning Vibes" "Evening Chill" --name "Full Day Mix" --yes
+```
+
+**Example output:**
+
+```
+Merging 2 playlist(s)  →  'Day Mix'
+  Sources : Morning Vibes, Afternoon Groove
+  Tracks  : 84 (12 duplicate(s) removed)
+
+Create 'Day Mix' with 84 tracks? [y/N] y
+Created 'Day Mix' with 84 tracks.
+```
+
+> **Note:** If a playlist named `--name` already exists it will be replaced.
+
+---
+
 ## Output Files
 
 ### Export CSV
@@ -389,18 +588,18 @@ Road Trip,Fleetwood Mac,Rumours,1977,1,Second Hand News,143,Rock,/music/Fleetwoo
 
 ### Log CSV
 
-Produced by `export`, `import`, `suggest`, and `generate`. Each run **appends** to the log so you keep a full history.
+Produced by all commands that modify playlists. Each run **appends** to the log so you keep a full history.
 
-| Column      | Description                                                              |
-|-------------|--------------------------------------------------------------------------|
-| Timestamp   | Date and time (ISO 8601)                                                 |
-| Operation   | `export`, `import`, `generate`, `export_image`, or `import_image`        |
-| Playlist    | Playlist name                                                            |
-| Artist      | Artist name (blank for image and generate rows)                          |
-| Album       | Album title (blank for image and generate rows)                          |
-| Track Title | Track name (blank for image and generate rows)                           |
-| Status      | `success`, `error`, or `skipped`                                         |
-| Message     | Details — file path on image success, reason on error or skip            |
+| Column      | Description                                                                                                         |
+|-------------|---------------------------------------------------------------------------------------------------------------------|
+| Timestamp   | Date and time (ISO 8601)                                                                                            |
+| Operation   | `export`, `import`, `generate`, `dedupe`, `shuffle`, `sync`, `merge`, `export_image`, or `import_image`             |
+| Playlist    | Playlist name                                                                                                       |
+| Artist      | Artist name (blank for image, generate, shuffle, and merge rows)                                                    |
+| Album       | Album title (blank for image, generate, shuffle, and merge rows)                                                    |
+| Track Title | Track name (blank for image, generate, shuffle, and merge rows)                                                     |
+| Status      | `success`, `error`, or `skipped`                                                                                    |
+| Message     | Details — file path on image success, reason on error or skip                                                       |
 
 ---
 
@@ -447,6 +646,38 @@ python plex_playlist_tools.py generate "upbeat pop hits" --yes
 ```bash
 # Re-import and append only new tracks (default mode)
 python plex_playlist_tools.py import --file updated_export.csv
+```
+
+### Clean up duplicate tracks across all playlists
+
+```bash
+python plex_playlist_tools.py dedupe --all-playlists --yes
+```
+
+### Make a shuffled party version of a playlist
+
+```bash
+python plex_playlist_tools.py shuffle "Road Trip" --name "Road Trip (Party Mix)" --yes
+```
+
+### Combine genre playlists into one master mix
+
+```bash
+python plex_playlist_tools.py merge "Rock Classics" "90s Rock" "Indie Rock" --name "All Rock" --yes
+```
+
+### Mirror your playlists to a second Plex server
+
+```bash
+python plex_playlist_tools.py --url http://192.168.1.10:32400 --token TOKEN_A \
+  sync --all-playlists \
+  --dest-url http://192.168.1.20:32400 --dest-token TOKEN_B
+```
+
+### Rename a playlist
+
+```bash
+python plex_playlist_tools.py rename "Old Name" "New Name"
 ```
 
 ### Export a playlist with every available cover image
