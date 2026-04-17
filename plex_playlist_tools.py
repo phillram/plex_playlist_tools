@@ -561,7 +561,7 @@ def import_playlists(plex: PlexServer, library_name: str | None,
                             "skipped", "Already in playlist"
                         ))
                 if new_tracks:
-                    existing_playlist.addItems(new_tracks)
+                    _add_items_batched(existing_playlist, new_tracks)
                     print(f"  Appended {len(new_tracks)} track(s) to '{playlist_name}' "
                           f"({duplicates} already present, {failed} not found)")
                 else:
@@ -572,7 +572,7 @@ def import_playlists(plex: PlexServer, library_name: str | None,
                 if existing_playlist:
                     existing_playlist.delete()
                     print(f"  Removed existing playlist '{playlist_name}'")
-                new_playlist = plex.createPlaylist(playlist_name, items=matched)
+                new_playlist = _create_playlist_batched(plex, playlist_name, matched)
                 print(f"  Created '{playlist_name}': {len(matched)} added, {failed} not found")
 
             if images_dir and new_playlist:
@@ -904,6 +904,23 @@ def find_tracks_for_prompt(
     return matching, criteria
 
 
+_BATCH_SIZE = 200
+
+
+def _add_items_batched(playlist, items: list) -> None:
+    """Call addItems in chunks to avoid Plex's URL-length limit."""
+    for i in range(0, len(items), _BATCH_SIZE):
+        playlist.addItems(items[i:i + _BATCH_SIZE])
+
+
+def _create_playlist_batched(plex: PlexServer, name: str, items: list):
+    """Create a playlist with the first batch, then addItems for the rest."""
+    playlist = plex.createPlaylist(name, items=items[:_BATCH_SIZE])
+    if len(items) > _BATCH_SIZE:
+        _add_items_batched(playlist, items[_BATCH_SIZE:])
+    return playlist
+
+
 def _create_or_replace_playlist(
     plex: PlexServer, name: str, tracks: list, log_rows: list
 ) -> None:
@@ -912,7 +929,7 @@ def _create_or_replace_playlist(
         if existing.title == name:
             existing.delete()
             break
-    plex.createPlaylist(name, items=tracks)
+    _create_playlist_batched(plex, name, tracks)
     log_rows.append(log_row("generate", name, "", "", "", "success",
                              f"Created with {len(tracks)} tracks"))
 
@@ -1138,7 +1155,7 @@ def cmd_shuffle(
             existing.delete()
             break
 
-    plex.createPlaylist(name, items=tracks)
+    _create_playlist_batched(plex, name, tracks)
     log_rows = [log_row(
         "shuffle", name, "", "", "", "success",
         f"Created from '{source.title}' — {len(tracks)} tracks shuffled{seed_note}",
@@ -1216,7 +1233,7 @@ def cmd_sync(
             new_tracks = [t for t in matched if t.ratingKey not in existing_keys]
             dupes = len(matched) - len(new_tracks)
             if new_tracks:
-                dest_existing.addItems(new_tracks)
+                _add_items_batched(dest_existing, new_tracks)
                 print(f"  Appended {len(new_tracks)} track(s) "
                       f"({dupes} already present, {failed} not found)")
             else:
@@ -1224,7 +1241,7 @@ def cmd_sync(
         else:
             if dest_existing:
                 dest_existing.delete()
-            dest_plex.createPlaylist(playlist.title, items=matched)
+            _create_playlist_batched(dest_plex, playlist.title, matched)
             print(f"  Created '{playlist.title}': {len(matched)} synced, {failed} not found")
 
         for t in matched:
@@ -1321,7 +1338,7 @@ def cmd_merge(
             existing.delete()
             break
 
-    plex.createPlaylist(output_name, items=merged)
+    _create_playlist_batched(plex, output_name, merged)
     log_rows = [log_row(
         "merge", output_name, "", "", "", "success",
         f"Merged from: {', '.join(p.title for p in sources)} — {len(merged)} tracks{dupe_note}",
