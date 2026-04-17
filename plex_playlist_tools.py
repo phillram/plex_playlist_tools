@@ -722,9 +722,13 @@ def scan_library(library) -> list[dict]:
     total = len(artists)
     for i, artist in enumerate(artists, 1):
         print(f"  [{i}/{total}] {artist.title}                    ", end="\r")
-        genres = [g.tag for g in (artist.genres or [])]
+        artist_genres = [g.tag for g in (artist.genres or [])]
         for album in artist.albums():
+            album_genres = [g.tag for g in (album.genres or [])]
             for track in album.tracks():
+                # Use the most specific genre tags available: track > album > artist
+                track_genres = [g.tag for g in (getattr(track, "genres", None) or [])]
+                genres = track_genres or album_genres or artist_genres
                 data.append({
                     "obj":    track,
                     "artist": artist.title,
