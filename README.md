@@ -264,6 +264,8 @@ There are two modes:
 | `--create-all`        | off                        | Create every suggestion without prompting                                                        |
 | `--deep`              | off                        | Look up MusicBrainz tags for more accurate mood/genre suggestions                               |
 | `--cache-file`        | `mb_cache.json`            | JSON file used to cache MusicBrainz results between runs                                         |
+| `--reset-cache`       | off                        | Delete the entire cache and re-fetch all artists (use after major library changes)               |
+| `--refresh-artist`    | —                          | Re-fetch one or more specific artists without clearing the rest of the cache                     |
 | `--include-best-of`   | off                        | Also suggest "Best of \<Artist\>" playlists (omitted by default)                                 |
 | `--log`               | `LOG_FILE` from `.env`     | Path for the log CSV file                                                                        |
 
@@ -278,6 +280,12 @@ python plex_playlist_tools.py suggest --deep
 
 # Deep mode with a custom cache location
 python plex_playlist_tools.py suggest --deep --cache-file /data/mb_cache.json
+
+# Wipe the cache and re-fetch everything (e.g. after a large library overhaul)
+python plex_playlist_tools.py suggest --deep --reset-cache
+
+# Re-fetch specific artists only, leave everyone else cached
+python plex_playlist_tools.py suggest --deep --refresh-artist "Pink Floyd" "David Bowie"
 
 # Include "Best of <Artist>" suggestions
 python plex_playlist_tools.py suggest --include-best-of
@@ -330,7 +338,7 @@ Enrichment complete. Cache saved to mb_cache.json
   ...
 ```
 
-> **Note (deep mode):** Fetches all recordings for each artist in one paginated request, then matches them to your Plex tracks by title. Progress is saved every 10 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
+> **Note (deep mode):** Fetches all recordings for each artist in one paginated request, then matches them to your Plex tracks by title. Progress is saved every 10 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. New tracks added to your library are picked up automatically on the next run (their cache key won't exist yet). To force a full re-fetch use `--reset-cache`; to re-fetch specific artists without touching the rest use `--refresh-artist`. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
 
 > **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 

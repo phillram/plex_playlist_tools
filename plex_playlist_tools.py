@@ -861,12 +861,21 @@ def _enrich_artist_tracks(artist_name: str, tracks: list[dict], cache: dict) -> 
             cache[key]  = title_tags.get(norm, [])
 
 
-def scan_library_deep(library, cache_file: str) -> list[dict]:
+def scan_library_deep(
+    library,
+    cache_file: str,
+    reset_cache: bool = False,
+    refresh_artists: list[str] | None = None,
+) -> list[dict]:
     """
     Like scan_library but enriches each track with MusicBrainz tags.
     Uses artist-level browse batching: ~2 MB requests per artist instead of
     ~2 per track, giving a ~10-20x speed improvement on large libraries.
     Results are cached in a JSON file; interrupted runs resume automatically.
+
+    reset_cache:      delete and rebuild the entire cache from scratch.
+    refresh_artists:  list of artist names whose cache entries are cleared
+                      before the run (partial refresh without a full reset).
     """
     try:
         import musicbrainzngs
@@ -879,7 +888,23 @@ def scan_library_deep(library, cache_file: str) -> list[dict]:
     musicbrainzngs.set_useragent("PlexPlaylistTools", "1.0",
                                  "https://github.com/user/plex_playlist_tools")
 
+    if reset_cache and os.path.exists(cache_file):
+        os.remove(cache_file)
+        print(f"Cache reset: deleted {cache_file}")
+
     cache = _load_mb_cache(cache_file)
+
+    if refresh_artists:
+        for artist_name in refresh_artists:
+            al = artist_name.lower()
+            # Remove artist MBID so the search is re-run
+            cache.pop(f"artist_mbid|{al}", None)
+            # Remove all track entries for this artist
+            stale = [k for k in cache if k.startswith(f"{al}|")]
+            for k in stale:
+                del cache[k]
+        print(f"Cache cleared for: {', '.join(refresh_artists)}")
+
     data  = scan_library(library)
 
     # Group tracks that still need a MB lookup by artist
@@ -1130,11 +1155,16 @@ def cmd_suggest(
     create_all: bool,
     deep: bool,
     cache_file: str,
+    reset_cache: bool,
+    refresh_artists: list[str] | None,
     include_best_of: bool,
     log_file: str,
 ) -> None:
     library    = find_music_library(plex, library_name)
-    track_data = scan_library_deep(library, cache_file) if deep else scan_library(library)
+    track_data = (
+        scan_library_deep(library, cache_file, reset_cache, refresh_artists)
+        if deep else scan_library(library)
+    )
     all_suggestions = build_suggestions(
         track_data, min_tracks, min_artist_tracks, include_best_of
     )
@@ -1634,6 +1664,11 @@ def main():
                           "mood/genre tags (slow on first run; results cached)")
     sug.add_argument("--cache-file",        default="mb_cache.json", metavar="FILE",
                      help="JSON cache file for MusicBrainz lookups (default: mb_cache.json)")
+    sug.add_argument("--reset-cache",       action="store_true",
+                     help="Delete the entire cache and re-fetch all artists from MusicBrainz")
+    sug.add_argument("--refresh-artist",    nargs="+", metavar="ARTIST",
+                     help="Clear and re-fetch cache for one or more specific artists "
+                          "(e.g. --refresh-artist \"Pink Floyd\" \"David Bowie\")")
     sug.add_argument("--include-best-of",   action="store_true",
                      help="Include 'Best of <Artist>' suggestions (omitted by default)")
     sug.add_argument("--log",               default=default_log, metavar="FILE",
@@ -1773,7 +1808,9 @@ def main():
             plex, library_name,
             args.min_tracks, args.min_artist_tracks,
             args.limit, args.create_all,
-            args.deep, args.cache_file, args.include_best_of,
+            args.deep, args.cache_file,
+            args.reset_cache, getattr(args, "refresh_artist", None),
+            args.include_best_of,
             args.log,
         )
 
