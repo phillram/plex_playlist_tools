@@ -21,8 +21,6 @@ Export, import, and manage music playlists in Plex. Works with Plex running loca
    - [sync](#sync)
    - [rename](#rename)
    - [merge](#merge)
-   - [backup](#backup)
-   - [restore](#restore)
 6. [Output Files](#output-files)
 7. [Common Scenarios](#common-scenarios)
 
@@ -199,7 +197,8 @@ python plex_playlist_tools.py export --all-playlists --images-dir ./covers
 python plex_playlist_tools.py export --all-playlists --images-dir ./covers --all-images
 ```
 
-> **Note on images:**
+> **Notes:**
+> - Playlist exports include a `Summary` column (the description text set on the playlist). It is restored automatically when you `import` the CSV.
 > - `--images-dir` alone saves one file per playlist (the active cover): `<dir>/<playlist name>.jpg`
 > - `--all-images` saves every cover into a sub-folder: `<dir>/<playlist name>/<playlist name>-1-selected.jpg`, `<playlist name>-2.jpg`, etc. The `-selected` suffix marks the active cover.
 > - Library exports do not support image export.
@@ -208,7 +207,7 @@ python plex_playlist_tools.py export --all-playlists --images-dir ./covers --all
 
 ### import
 
-Reads a previously exported CSV and recreates the playlists in Plex. Tracks are matched first by **file path**, then by **artist + track title**.
+Reads a previously exported CSV and recreates the playlists in Plex. Tracks are matched first by **file path**, then by **artist + track title**. Playlist summaries stored in the `Summary` column are restored automatically.
 
 **Flags:**
 
@@ -591,106 +590,22 @@ Created 'Day Mix' with 84 tracks.
 
 ---
 
-### backup
-
-Snapshots all music playlists to a single portable JSON file. Each playlist is saved with its name, summary, and full track list including file paths. The backup can be used to restore playlists after a Plex migration, library re-scan, or accidental deletion.
-
-**Flags:**
-
-| Flag       | Default            | Description                                               |
-|------------|--------------------|-----------------------------------------------------------|
-| `--output` | `plex_backup.json` | Output JSON file                                          |
-| `--log`    | `LOG_FILE` from `.env` | Path for the log CSV file                             |
-
-**Examples:**
-
-```bash
-# Back up all playlists to the default file
-python plex_playlist_tools.py backup
-
-# Back up to a custom location
-python plex_playlist_tools.py backup --output /backups/plex_2026-04-19.json
-```
-
-**Example output:**
-
-```
-Backing up 8 playlist(s)...
-  Chill Mix  (124 tracks)
-  Road Trip  (42 tracks)
-  Workout    (87 tracks)
-  ...
-
-Backed up 8 playlist(s) → plex_backup.json
-```
-
----
-
-### restore
-
-Recreates playlists from a JSON backup file produced by the `backup` command. Each track is matched to the current library first by file path, then by artist + title. Useful after a Plex migration, server move, or library re-scan that changes internal track IDs.
-
-**Flags:**
-
-| Flag           | Default                | Description                                                                              |
-|----------------|------------------------|------------------------------------------------------------------------------------------|
-| `--file`       | (required)             | Backup JSON file to restore from                                                         |
-| `--mode`       | `append`               | `append`: add only tracks not already in the playlist; `replace`: delete and recreate    |
-| `--yes` / `-y` | off                    | Restore all playlists without prompting                                                   |
-| `--log`        | `LOG_FILE` from `.env` | Path for the log CSV file                                                                 |
-
-**Examples:**
-
-```bash
-# Restore interactively from a backup
-python plex_playlist_tools.py restore --file plex_backup.json
-
-# Restore everything without prompting (replace mode)
-python plex_playlist_tools.py restore --file plex_backup.json --mode replace --yes
-
-# Restore to a different server
-python plex_playlist_tools.py --url http://192.168.1.50:32400 --token TOKEN \
-  restore --file plex_backup.json --yes
-```
-
-**Example output:**
-
-```
-Building track index from library...
-  [287/287] scanned
-Indexed 9,847 track(s).
-
-Restoring 3 playlist(s) from backup created 2026-04-19T10:30:00
-
-  'Chill Mix': 124 matched
-    Restore 'Chill Mix' (124 tracks, mode=append)? [y/N] y
-    Created 'Chill Mix' (124 tracks).
-  'Road Trip': 41 matched, 1 not found in library
-    Restore 'Road Trip' (41 tracks, mode=append)? [y/N] y
-    Created 'Road Trip' (41 tracks).
-
-Restored 2 playlist(s).
-```
-
-> **Note:** Tracks not found in the current library are skipped and reported. This can happen if files have moved or been deleted since the backup was made. Use `--mode replace` to fully overwrite existing playlists rather than merging into them.
-
----
-
 ## Output Files
 
 ### Export CSV
 
 Produced by the `export` command.
 
-| Column         | Description                                    |
-|----------------|------------------------------------------------|
-| Playlist       | Playlist name (blank for library exports)      |
-| Artist         | Artist name                                    |
-| Album          | Album title                                    |
-| Year           | Release year                                   |
-| Track Number   | Track position within the album                |
-| Track Title    | Name of the track                              |
-| Duration (s)   | Track duration in seconds                      |
+| Column         | Description                                                          |
+|----------------|----------------------------------------------------------------------|
+| Playlist       | Playlist name (blank for library exports)                            |
+| Summary        | Playlist description/summary (blank for library exports)             |
+| Artist         | Artist name                                                          |
+| Album          | Album title                                                          |
+| Year           | Release year                                                         |
+| Track Number   | Track position within the album                                      |
+| Track Title    | Name of the track                                                    |
+| Duration (s)   | Track duration in seconds                                            |
 | Genre          | Genre tags (comma-separated)                   |
 | File Path      | Full path to the audio file on the Plex server |
 
@@ -711,7 +626,7 @@ Produced by all commands that modify playlists. Each run **appends** to the log 
 | Column      | Description                                                                                                         |
 |-------------|---------------------------------------------------------------------------------------------------------------------|
 | Timestamp   | Date and time (ISO 8601)                                                                                            |
-| Operation   | `export`, `import`, `generate`, `dedupe`, `shuffle`, `sync`, `merge`, `backup`, `restore`, `export_image`, or `import_image` |
+| Operation   | `export`, `import`, `generate`, `dedupe`, `shuffle`, `sync`, `merge`, `export_image`, or `import_image` |
 | Playlist    | Playlist name                                                                                                       |
 | Artist      | Artist name (blank for image, generate, shuffle, and merge rows)                                                    |
 | Album       | Album title (blank for image, generate, shuffle, and merge rows)                                                    |
@@ -733,18 +648,18 @@ python plex_playlist_tools.py suggest
 ### Back up all playlists and restore them
 
 ```bash
-# Snapshot all playlists to a JSON file
-python plex_playlist_tools.py backup --output plex_backup.json
+# Export all playlists (includes playlist summaries and file paths)
+python plex_playlist_tools.py export --all-playlists --output plex_backup.csv
 
 # Restore on the same or a different Plex server
-python plex_playlist_tools.py restore --file plex_backup.json --yes
+python plex_playlist_tools.py import --file plex_backup.csv --mode replace
 
-# Restore to a different server
-python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN \
-  restore --file plex_backup.json --mode replace --yes
+# Include cover images in the backup and restore them too
+python plex_playlist_tools.py export --all-playlists --output plex_backup.csv --images-dir ./covers
+python plex_playlist_tools.py import --file plex_backup.csv --images-dir ./covers --mode replace
 ```
 
-> The backup stores track file paths and artist/title metadata. Restore matches by file path first, then falls back to artist + title — so it works even after a Plex library re-scan or server migration.
+> Import matches tracks by file path first, then falls back to artist + title — so it works even after a Plex library re-scan that changes internal IDs. Playlist summaries are preserved automatically.
 
 ### Create playlists automatically from your library
 

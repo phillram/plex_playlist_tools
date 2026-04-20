@@ -16,8 +16,6 @@ Commands:
   sync            Mirror playlist(s) from this server to another Plex server
   rename          Rename a playlist
   merge           Combine multiple playlists into one
-  backup          Snapshot all playlists to a portable JSON file
-  restore         Recreate playlists from a JSON backup file
 
 Connection (in order of precedence):
   1. --url / --token CLI flags
@@ -254,7 +252,7 @@ def upload_playlist_image(plex: PlexServer, playlist, images_dir: str) -> bool:
 # ─── CSV helpers ─────────────────────────────────────────────────────────────
 
 EXPORT_FIELDS = [
-    "Playlist", "Artist", "Album", "Year", "Track Number",
+    "Playlist", "Summary", "Artist", "Album", "Year", "Track Number",
     "Track Title", "Duration (s)", "Genre", "File Path",
 ]
 
@@ -385,6 +383,7 @@ def export_playlists(plex: PlexServer, playlist_names: list | None,
     for i, playlist in enumerate(selected, 1):
         items = playlist.items()
         print(f"  [{i}/{total}] '{playlist.title}' — {len(items)} tracks")
+        summary = getattr(playlist, "summary", "") or ""
         for track in items:
             artist = track.grandparentTitle or ""
             album  = track.parentTitle or ""
@@ -393,6 +392,7 @@ def export_playlists(plex: PlexServer, playlist_names: list | None,
             file_path = track.media[0].parts[0].file if track.media else ""
             rows.append({
                 "Playlist":     playlist.title,
+                "Summary":      summary,
                 "Artist":       artist,
                 "Album":        album,
                 "Year":         year,
@@ -578,6 +578,17 @@ def import_playlists(plex: PlexServer, library_name: str | None,
                     print(f"  Removed existing playlist '{playlist_name}'")
                 new_playlist = _create_playlist_batched(plex, playlist_name, matched)
                 print(f"  Created '{playlist_name}': {len(matched)} added, {failed} not found")
+
+            # Restore playlist summary if the CSV carries one
+            summary = next(
+                (r.get("Summary", "").strip() for r in tracks if r.get("Summary", "").strip()),
+                "",
+            )
+            if summary and new_playlist:
+                try:
+                    new_playlist.edit(summary=summary)
+                except Exception:
+                    pass
 
             if images_dir and new_playlist:
                 ok = upload_playlist_image(plex, new_playlist, images_dir)
@@ -1529,172 +1540,6 @@ def cmd_merge(
     print(f"Log  : {log_file}")
 
 
-# ─── Backup / Restore ────────────────────────────────────────────────────────
-
-def cmd_backup(plex: PlexServer, output_file: str, log_file: str) -> None:
-    playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
-    if not playlists:
-        print("No music playlists found.")
-        return
-
-    snapshot = {
-        "version":        1,
-        "created":        datetime.now().isoformat(),
-        "server":         plex._baseurl,
-        "playlist_count": len(playlists),
-        "playlists":      [],
-    }
-
-    print(f"Backing up {len(playlists)} playlist(s)...")
-    for pl in playlists:
-        tracks = []
-        for item in pl.items():
-            locs = getattr(item, "locations", []) or []
-            tracks.append({
-                "title":  item.title,
-                "artist": item.grandparentTitle or "",
-                "album":  item.parentTitle or "",
-                "year":   getattr(item, "year", None),
-                "file":   locs[0] if locs else None,
-            })
-        snapshot["playlists"].append({
-            "name":    pl.title,
-            "summary": getattr(pl, "summary", "") or "",
-            "tracks":  tracks,
-        })
-        print(f"  {pl.title}  ({len(tracks)} tracks)")
-
-    try:
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, ensure_ascii=False)
-    except OSError as e:
-        sys.exit(f"Error writing backup file: {e}")
-
-    log_rows = [log_row("backup", "", "", "", "", "success",
-                        f"Backed up {len(playlists)} playlists to {output_file}")]
-    append_log(log_file, log_rows)
-    print(f"\nBacked up {len(playlists)} playlist(s) → {output_file}")
-    print(f"Log  : {log_file}")
-
-
-def _build_track_lookup(library) -> tuple[dict, dict]:
-    """
-    Scan the library and return two lookup dicts for matching backup tracks:
-      path_lookup: {file_path: track_obj}
-      id_lookup:   {(artist_lower, title_lower): track_obj}
-    """
-    path_lookup: dict = {}
-    id_lookup:   dict = {}
-    artists = library.all()
-    total   = len(artists)
-    for i, artist in enumerate(artists, 1):
-        print(f"  [{i}/{total}] {artist.title}                    ", end="\r")
-        for album in artist.albums():
-            for track in album.tracks():
-                for loc in (getattr(track, "locations", []) or []):
-                    path_lookup[loc] = track
-                id_lookup[(artist.title.lower(), track.title.lower())] = track
-    print(f"\nIndexed {len(id_lookup)} track(s).")
-    return path_lookup, id_lookup
-
-
-def cmd_restore(
-    plex: PlexServer,
-    library_name: str | None,
-    input_file: str,
-    mode: str,
-    yes: bool,
-    log_file: str,
-) -> None:
-    try:
-        with open(input_file, "r", encoding="utf-8") as f:
-            snapshot = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        sys.exit(f"Error reading backup file: {e}")
-
-    playlists_data = snapshot.get("playlists", [])
-    if not playlists_data:
-        print("Backup file contains no playlists.")
-        return
-
-    library = find_music_library(plex, library_name)
-    print("Building track index from library...")
-    path_lookup, id_lookup = _build_track_lookup(library)
-
-    backed_up = snapshot.get("created", "unknown")
-    print(f"\nRestoring {len(playlists_data)} playlist(s) from backup created {backed_up}\n")
-
-    log_rows: list[dict] = []
-    restored = 0
-
-    for pl_data in playlists_data:
-        name      = pl_data["name"]
-        matched:   list = []
-        unmatched: list = []
-
-        for t in pl_data.get("tracks", []):
-            obj = None
-            if t.get("file"):
-                obj = path_lookup.get(t["file"])
-            if obj is None:
-                obj = id_lookup.get((t["artist"].lower(), t["title"].lower()))
-            if obj:
-                matched.append(obj)
-            else:
-                unmatched.append(t)
-
-        miss_note = f", {len(unmatched)} not found in library" if unmatched else ""
-        print(f"  '{name}': {len(matched)} matched{miss_note}")
-
-        if not matched:
-            print(f"    Skipping — no tracks found in current library.")
-            continue
-
-        if not yes:
-            raw = input(
-                f"    Restore '{name}' ({len(matched)} tracks, mode={mode})? [y/N] "
-            ).strip().lower()
-            if raw not in ("y", "yes"):
-                print("    Skipped.")
-                continue
-
-        if mode == "replace":
-            for existing in plex.playlists():
-                if existing.title == name:
-                    existing.delete()
-                    break
-            _create_playlist_batched(plex, name, matched)
-            print(f"    Restored '{name}' ({len(matched)} tracks).")
-        else:  # append
-            existing = next(
-                (p for p in plex.playlists()
-                 if p.title == name and p.playlistType == "audio"),
-                None,
-            )
-            if existing:
-                existing_keys = {t.ratingKey for t in existing.items()}
-                new_tracks    = [t for t in matched if t.ratingKey not in existing_keys]
-                if new_tracks:
-                    _add_items_batched(existing, new_tracks)
-                    print(f"    Appended {len(new_tracks)} new track(s) to '{name}'.")
-                else:
-                    print(f"    '{name}' already up to date — nothing added.")
-                    continue
-            else:
-                _create_playlist_batched(plex, name, matched)
-                print(f"    Created '{name}' ({len(matched)} tracks).")
-
-        log_rows.append(log_row(
-            "restore", name, "", "", "", "success",
-            f"{len(matched)} tracks restored (mode={mode}){miss_note}",
-        ))
-        restored += 1
-
-    append_log(log_file, log_rows)
-    print(f"\nRestored {restored} playlist(s).")
-    if log_rows:
-        print(f"Log  : {log_file}")
-
 
 # ─── List playlists ───────────────────────────────────────────────────────────
 
@@ -1876,27 +1721,6 @@ def main():
     mer.add_argument("--log", default=default_log, metavar="FILE",
                      help=f"Log CSV file (default: {default_log})")
 
-    # ── backup ──
-    bak = sub.add_parser("backup",
-                         help="Snapshot all playlists to a portable JSON file")
-    bak.add_argument("--output", default="plex_backup.json", metavar="FILE",
-                     help="Output JSON file (default: plex_backup.json)")
-    bak.add_argument("--log",    default=default_log, metavar="FILE",
-                     help=f"Log CSV file (default: {default_log})")
-
-    # ── restore ──
-    res = sub.add_parser("restore",
-                         help="Recreate playlists from a JSON backup file")
-    res.add_argument("--file", required=True, metavar="FILE",
-                     help="Backup JSON file to restore from")
-    res.add_argument("--mode", choices=["replace", "append"], default="append",
-                     help="append: add missing tracks only (default); "
-                          "replace: delete and recreate each playlist")
-    res.add_argument("--yes", "-y", action="store_true",
-                     help="Restore all playlists without prompting")
-    res.add_argument("--log",  default=default_log, metavar="FILE",
-                     help=f"Log CSV file (default: {default_log})")
-
     args = parser.parse_args()
 
     # ── Resolve connection settings: CLI flag > .env > auto-detect ──
@@ -2005,14 +1829,6 @@ def main():
             args.log,
         )
 
-    elif args.command == "backup":
-        cmd_backup(plex, args.output, args.log)
-
-    elif args.command == "restore":
-        cmd_restore(
-            plex, library_name,
-            args.file, args.mode, args.yes, args.log,
-        )
 
 
 if __name__ == "__main__":
