@@ -338,7 +338,7 @@ Enrichment complete. Cache saved to mb_cache.json
   ...
 ```
 
-> **Note (deep mode):** Fetches all recordings for each artist in one paginated request, then matches them to your Plex tracks by title. Progress is saved every 10 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. New tracks added to your library are picked up automatically on the next run (their cache key won't exist yet). To force a full re-fetch use `--reset-cache`; to re-fetch specific artists without touching the rest use `--refresh-artist`. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
+> **Note (deep mode):** Uses 4 concurrent workers to hide network latency while honouring MusicBrainz's 1 req/sec policy. Each artist is capped at 800 recordings to prevent runaway browses on artists like "Various Artists". A 20-second per-request timeout prevents slow responses from stalling the whole run. Progress is saved every 40 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. New tracks added to your library are picked up automatically on the next run. To force a full re-fetch use `--reset-cache`; to re-fetch specific artists use `--refresh-artist`. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
 
 > **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 
