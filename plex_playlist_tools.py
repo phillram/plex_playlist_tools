@@ -762,8 +762,6 @@ def scan_library(library) -> list[dict]:
 # ─── MusicBrainz helpers ─────────────────────────────────────────────────────
 
 _MB_RATE_LIMIT   = 1.05   # seconds between requests (MB ToS: max 1 req/sec)
-_MB_BROWSE_PAGE  = 100    # recordings per browse page (MB max)
-_MB_MAX_PAGES    = 8      # cap per-artist browse (800 recordings max)
 _MB_TIMEOUT      = 20     # seconds before a single HTTP request is abandoned
 _MB_WORKERS      = 4      # concurrent artists; rate limit is still 1 req/sec total
 _mb_last_request = 0.0
@@ -791,39 +789,60 @@ def _save_mb_cache(cache_file: str, cache: dict) -> None:
 def _mb_call(fn, *args, **kwargs):
     """Thread-safe, rate-limited wrapper for musicbrainzngs calls (1 req/sec global)."""
     global _mb_last_request
-    with _mb_lock:
-        wait = _MB_RATE_LIMIT - (time.time() - _mb_last_request)
-        if wait > 0:
-            time.sleep(wait)
-        _mb_last_request = time.time()
+    while True:
+        with _mb_lock:
+            now = time.time()
+            elapsed = now - _mb_last_request
+            if elapsed >= _MB_RATE_LIMIT:
+                _mb_last_request = now
+                break
+            wait = _MB_RATE_LIMIT - elapsed
+        time.sleep(wait)   # outside lock — other workers can check rate limit while waiting
     return fn(*args, **kwargs)
 
 
-def _normalize_mb_title(title: str) -> str:
-    """Strip common suffixes that differ between Plex and MusicBrainz titles."""
-    title = title.lower().strip()
-    title = re.sub(
-        r'\s*[\(\[].*(remaster|live|remix|edit|version|radio|acoustic|demo|mono|stereo).*[\)\]]$',
-        '', title, flags=re.IGNORECASE,
-    ).strip()
-    return title
+def _batch_fetch_artist_mbids(artist_names: list, cache: dict) -> None:
+    """
+    Pre-fetch MusicBrainz artist IDs for a list of artists using batched Lucene OR queries
+    (25 artists per request) instead of one search per artist.
+    """
+    import musicbrainzngs
+    uncached = [n for n in artist_names if f"artist_mbid|{n.lower()}" not in cache]
+    if not uncached:
+        return
+    _BATCH = 25
+    for i in range(0, len(uncached), _BATCH):
+        chunk = uncached[i:i + _BATCH]
+        terms = " OR ".join(f'artist:"{n.replace(chr(34), " ")}"' for n in chunk)
+        try:
+            result  = _mb_call(musicbrainzngs.search_artists, query=terms, limit=100)
+            by_name = {
+                a.get("name", "").lower(): a["id"]
+                for a in result.get("artist-list", [])
+            }
+            for name in chunk:
+                cache[f"artist_mbid|{name.lower()}"] = by_name.get(name.lower())
+        except Exception:
+            for name in chunk:
+                cache.setdefault(f"artist_mbid|{name.lower()}", None)
+
 
 
 def _enrich_artist_tracks(artist_name: str, tracks: list[dict], cache: dict) -> None:
     """
-    Fetch all MusicBrainz recordings for one artist via the browse endpoint
-    (one artist search + paginated browse vs one search+lookup per track),
-    then populate the cache for any tracks whose title matches.
-    Unmatched tracks are written as empty so they aren't retried.
+    Enrich tracks for one artist using a single get_artist_by_id call (1 MB request).
+    Artist-level tags are applied to every track — much faster than per-recording browse.
+    MBID is expected to already be in cache from _batch_fetch_artist_mbids; a fallback
+    search is performed if it's missing.
     """
     import musicbrainzngs
 
-    # Step 1: resolve artist MBID (cached)
+    # Step 1: resolve artist MBID (usually already populated by the batch pre-fetch)
     artist_key = f"artist_mbid|{artist_name.lower()}"
     if artist_key not in cache:
         try:
-            result     = _mb_call(musicbrainzngs.search_artists, artist=artist_name, limit=3)
-            found      = result.get("artist-list", [])
+            result = _mb_call(musicbrainzngs.search_artists, artist=artist_name, limit=3)
+            found  = result.get("artist-list", [])
             cache[artist_key] = found[0]["id"] if found else None
         except Exception:
             cache[artist_key] = None
@@ -834,38 +853,25 @@ def _enrich_artist_tracks(artist_name: str, tracks: list[dict], cache: dict) -> 
             cache.setdefault(f"{artist_name.lower()}|{t['title'].lower()}", [])
         return
 
-    # Step 2: browse recordings (paginated, capped), build normalised-title → tags map
-    title_tags: dict[str, list[str]] = {}
-    offset = 0
-    for _ in range(_MB_MAX_PAGES):
+    # Step 2: fetch artist-level tags (1 request, no pagination)
+    artist_tags_key = f"artist_tags|{artist_mbid}"
+    if artist_tags_key not in cache:
         try:
-            resp = _mb_call(
-                musicbrainzngs.browse_recordings,
-                artist=artist_mbid,
-                includes=["tags"],
-                limit=_MB_BROWSE_PAGE,
-                offset=offset,
-            )
-        except Exception:
-            break
-        recs = resp.get("recording-list", [])
-        for rec in recs:
-            tag_list = rec.get("tag-list", [])
+            resp     = _mb_call(musicbrainzngs.get_artist_by_id, artist_mbid,
+                                includes=["tags"])
+            tag_list = resp.get("artist", {}).get("tag-list", [])
             tag_list.sort(key=lambda t: -int(t.get("count", 0)))
-            tags = [t["name"] for t in tag_list[:20]]
-            norm = _normalize_mb_title(rec["title"])
-            if tags and (norm not in title_tags or len(tags) > len(title_tags[norm])):
-                title_tags[norm] = tags
-        if len(recs) < _MB_BROWSE_PAGE:
-            break
-        offset += _MB_BROWSE_PAGE
+            cache[artist_tags_key] = [t["name"] for t in tag_list[:20]]
+        except Exception:
+            cache[artist_tags_key] = []
 
-    # Step 3: write results (or empty sentinel) for every input track
+    artist_tags = cache[artist_tags_key]
+
+    # Step 3: apply the same artist tags to every uncached track
     for t in tracks:
         key = f"{artist_name.lower()}|{t['title'].lower()}"
         if key not in cache:
-            norm        = _normalize_mb_title(t["title"])
-            cache[key]  = title_tags.get(norm, [])
+            cache[key] = artist_tags
 
 
 def scan_library_deep(
@@ -926,14 +932,16 @@ def scan_library_deep(
     if total_artists == 0:
         print("All tracks already cached — skipping MusicBrainz lookups.")
     else:
-        # 4 workers share 1 req/sec; each worker can have a request in-flight while
-        # the rate limiter counts down, hiding network latency (~3-4x real speedup).
-        est_secs = max(1, total_artists * 2 // _MB_WORKERS)
+        # Pre-fetch all artist MBIDs in batches of 25 (ceil(artists/25) requests)
+        batch_requests = (total_artists + 24) // 25
+        # Each artist then needs 1 get_artist_by_id call; total ≈ batch + artists requests
+        est_secs = max(1, batch_requests + total_artists)
         print(
             f"Enriching tracks for {total_artists} artist(s) via MusicBrainz "
-            f"({_MB_WORKERS} workers, capped at {_MB_MAX_PAGES * _MB_BROWSE_PAGE} recordings/artist).\n"
+            f"({_MB_WORKERS} workers, 1 request/artist after batch MBID lookup).\n"
             f"Estimated time: ~{est_secs}s  |  Cache: {cache_file}"
         )
+        _batch_fetch_artist_mbids(list(artist_groups.keys()), cache)
         completed = 0
         with ThreadPoolExecutor(max_workers=_MB_WORKERS) as pool:
             futures = {

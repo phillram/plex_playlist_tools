@@ -252,7 +252,7 @@ Scans your music library and proposes playlist ideas based on genre, decade, moo
 There are two modes:
 
 - **Standard** (default) — fast; uses genre tags already in your Plex library, cascading from track → album → artist.
-- **Deep** (`--deep`) — thorough; queries [MusicBrainz](https://musicbrainz.org) for accurate mood and genre tags. Uses artist-level batch lookups (~2 requests per artist) rather than one request per track, so a library of 5,000 tracks across 300 artists takes roughly 10 minutes on the first run. All results are cached locally, so subsequent runs complete in seconds.
+- **Deep** (`--deep`) — thorough; queries [MusicBrainz](https://musicbrainz.org) for accurate mood and genre tags. Artist MBIDs are fetched in batches of 25, then one `get_artist_by_id` call is made per artist — roughly 1 request per artist total. A library of 300 artists takes about 5–6 minutes on the first run. All results are cached locally, so subsequent runs complete in seconds.
 
 **Flags:**
 
@@ -323,10 +323,9 @@ Created 2 playlist(s).
 
 ```
 Scanned 4,312 tracks across 287 artists.
-Enriching tracks for 287 artist(s) via MusicBrainz.
-Estimated time: ~574s (artist browse mode; saves every 10 artists).
-Cache: mb_cache.json
-  [287/287] Pink Floyd
+Enriching tracks for 287 artist(s) via MusicBrainz (4 workers, 1 request/artist after batch MBID lookup).
+Estimated time: ~299s  |  Cache: mb_cache.json
+  [287/287] artists enriched
 Enrichment complete. Cache saved to mb_cache.json
 
 63 suggestion(s) found. Showing top 25:
@@ -338,7 +337,7 @@ Enrichment complete. Cache saved to mb_cache.json
   ...
 ```
 
-> **Note (deep mode):** Uses 4 concurrent workers to hide network latency while honouring MusicBrainz's 1 req/sec policy. Each artist is capped at 800 recordings to prevent runaway browses on artists like "Various Artists". A 20-second per-request timeout prevents slow responses from stalling the whole run. Progress is saved every 40 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. New tracks added to your library are picked up automatically on the next run. To force a full re-fetch use `--reset-cache`; to re-fetch specific artists use `--refresh-artist`. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
+> **Note (deep mode):** Artist MBIDs are pre-fetched in batches of 25 (one Lucene OR query per batch), then a single `get_artist_by_id` call retrieves genre tags for each artist — roughly 1 request per artist rather than paginated per-recording browses. Uses 4 concurrent workers; the 1 req/sec MusicBrainz rate limit is enforced globally across all workers without holding locks during sleeps. A 20-second per-request timeout prevents slow responses from stalling a run. Progress is saved every 40 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. New library tracks are picked up automatically on the next run. Use `--reset-cache` to re-fetch everything or `--refresh-artist` to re-fetch specific artists.
 
 > **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 
