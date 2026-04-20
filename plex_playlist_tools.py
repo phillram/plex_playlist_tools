@@ -16,6 +16,8 @@ Commands:
   sync            Mirror playlist(s) from this server to another Plex server
   rename          Rename a playlist
   merge           Combine multiple playlists into one
+  backup          Snapshot all playlists to a portable JSON file
+  restore         Recreate playlists from a JSON backup file
 
 Connection (in order of precedence):
   1. --url / --token CLI flags
@@ -746,6 +748,7 @@ def scan_library(library) -> list[dict]:
 # ─── MusicBrainz helpers ─────────────────────────────────────────────────────
 
 _MB_RATE_LIMIT   = 1.05   # seconds between requests (MB ToS: max 1 req/sec)
+_MB_BROWSE_PAGE  = 100    # recordings per browse page (MB max)
 _mb_last_request = 0.0
 
 
@@ -778,47 +781,81 @@ def _mb_call(fn, *args, **kwargs):
     return result
 
 
-def _fetch_mb_tags(artist: str, title: str, album: str, cache: dict) -> list[str]:
-    """
-    Return folksonomy tag names for a recording from MusicBrainz.
-    Results are cached under a compound (artist, title) key.
-    """
-    key = f"{artist.lower()}|{title.lower()}"
-    if key in cache:
-        return cache[key]
+def _normalize_mb_title(title: str) -> str:
+    """Strip common suffixes that differ between Plex and MusicBrainz titles."""
+    title = title.lower().strip()
+    title = re.sub(
+        r'\s*[\(\[].*(remaster|live|remix|edit|version|radio|acoustic|demo|mono|stereo).*[\)\]]$',
+        '', title, flags=re.IGNORECASE,
+    ).strip()
+    return title
 
-    tags: list[str] = []
-    try:
-        import musicbrainzngs
-        result = _mb_call(
-            musicbrainzngs.search_recordings,
-            recording=title,
-            artist=artist,
-            release=album,
-            limit=5,
-        )
-        recordings = result.get("recording-list", [])
-        if recordings:
-            rec_id = recordings[0]["id"]
-            rec = _mb_call(
-                musicbrainzngs.get_recording_by_id,
-                rec_id,
+
+def _enrich_artist_tracks(artist_name: str, tracks: list[dict], cache: dict) -> None:
+    """
+    Fetch all MusicBrainz recordings for one artist via the browse endpoint
+    (one artist search + paginated browse vs one search+lookup per track),
+    then populate the cache for any tracks whose title matches.
+    Unmatched tracks are written as empty so they aren't retried.
+    """
+    import musicbrainzngs
+
+    # Step 1: resolve artist MBID (cached)
+    artist_key = f"artist_mbid|{artist_name.lower()}"
+    if artist_key not in cache:
+        try:
+            result     = _mb_call(musicbrainzngs.search_artists, artist=artist_name, limit=3)
+            found      = result.get("artist-list", [])
+            cache[artist_key] = found[0]["id"] if found else None
+        except Exception:
+            cache[artist_key] = None
+
+    artist_mbid = cache[artist_key]
+    if not artist_mbid:
+        for t in tracks:
+            cache.setdefault(f"{artist_name.lower()}|{t['title'].lower()}", [])
+        return
+
+    # Step 2: browse all recordings (paginated), build normalised-title → tags map
+    title_tags: dict[str, list[str]] = {}
+    offset = 0
+    while True:
+        try:
+            resp = _mb_call(
+                musicbrainzngs.browse_recordings,
+                artist=artist_mbid,
                 includes=["tags"],
+                limit=_MB_BROWSE_PAGE,
+                offset=offset,
             )
-            tag_list = rec.get("recording", {}).get("tag-list", [])
+        except Exception:
+            break
+        recs = resp.get("recording-list", [])
+        for rec in recs:
+            tag_list = rec.get("tag-list", [])
             tag_list.sort(key=lambda t: -int(t.get("count", 0)))
             tags = [t["name"] for t in tag_list[:20]]
-    except Exception:
-        pass
+            norm = _normalize_mb_title(rec["title"])
+            if tags and (norm not in title_tags or len(tags) > len(title_tags[norm])):
+                title_tags[norm] = tags
+        if len(recs) < _MB_BROWSE_PAGE:
+            break
+        offset += _MB_BROWSE_PAGE
 
-    cache[key] = tags
-    return tags
+    # Step 3: write results (or empty sentinel) for every input track
+    for t in tracks:
+        key = f"{artist_name.lower()}|{t['title'].lower()}"
+        if key not in cache:
+            norm        = _normalize_mb_title(t["title"])
+            cache[key]  = title_tags.get(norm, [])
 
 
 def scan_library_deep(library, cache_file: str) -> list[dict]:
     """
-    Like scan_library but enriches each track with per-song MusicBrainz tags.
-    Uses a JSON cache to avoid re-fetching; rate-limited to 1 req/sec.
+    Like scan_library but enriches each track with MusicBrainz tags.
+    Uses artist-level browse batching: ~2 MB requests per artist instead of
+    ~2 per track, giving a ~10-20x speed improvement on large libraries.
+    Results are cached in a JSON file; interrupted runs resume automatically.
     """
     try:
         import musicbrainzngs
@@ -833,34 +870,41 @@ def scan_library_deep(library, cache_file: str) -> list[dict]:
 
     cache = _load_mb_cache(cache_file)
     data  = scan_library(library)
-    total = len(data)
 
-    new_lookups = sum(
-        1 for t in data
-        if f"{t['artist'].lower()}|{t['title'].lower()}" not in cache
-    )
-    print(
-        f"Enriching {total} tracks via MusicBrainz "
-        f"({new_lookups} new lookups needed; ~{new_lookups} seconds).\n"
-        f"Cache: {cache_file}"
-    )
+    # Group tracks that still need a MB lookup by artist
+    artist_groups: dict[str, list[dict]] = defaultdict(list)
+    for track in data:
+        key = f"{track['artist'].lower()}|{track['title'].lower()}"
+        if key not in cache:
+            artist_groups[track["artist"]].append(track)
 
-    looked_up = 0
-    for i, track in enumerate(data, 1):
-        key    = f"{track['artist'].lower()}|{track['title'].lower()}"
-        is_new = key not in cache
-        mb_tags = _fetch_mb_tags(track["artist"], track["title"], track["album"], cache)
-        if mb_tags:
-            track["genres"] = mb_tags
-        if is_new:
-            looked_up += 1
-        if i % 100 == 0 or i == total:
-            print(f"  [{i}/{total}] processed ({looked_up} new MB lookups)   ", end="\r")
-            if looked_up > 0 and i % 500 == 0:
+    total_artists = len(artist_groups)
+    if total_artists == 0:
+        print("All tracks already cached — skipping MusicBrainz lookups.")
+    else:
+        # Estimate: ~2 requests per artist (search + 1 browse page for most artists)
+        est_secs = total_artists * 2
+        print(
+            f"Enriching tracks for {total_artists} artist(s) via MusicBrainz.\n"
+            f"Estimated time: ~{est_secs}s (artist browse mode; saves every 10 artists).\n"
+            f"Cache: {cache_file}"
+        )
+        for i, (artist_name, artist_tracks) in enumerate(artist_groups.items(), 1):
+            print(f"  [{i}/{total_artists}] {artist_name[:65]:<65}", end="\r")
+            _enrich_artist_tracks(artist_name, artist_tracks, cache)
+            if i % 10 == 0:
                 _save_mb_cache(cache_file, cache)
 
-    _save_mb_cache(cache_file, cache)
-    print(f"\nEnrichment complete. Cache saved to {cache_file}")
+        _save_mb_cache(cache_file, cache)
+        print(f"\nEnrichment complete. Cache saved to {cache_file}")
+
+    # Apply cached tags to all tracks
+    for track in data:
+        key  = f"{track['artist'].lower()}|{track['title'].lower()}"
+        tags = cache.get(key, [])
+        if tags:
+            track["genres"] = tags
+
     return data
 
 
@@ -1485,6 +1529,173 @@ def cmd_merge(
     print(f"Log  : {log_file}")
 
 
+# ─── Backup / Restore ────────────────────────────────────────────────────────
+
+def cmd_backup(plex: PlexServer, output_file: str, log_file: str) -> None:
+    playlists = [p for p in plex.playlists() if p.playlistType == "audio"]
+    if not playlists:
+        print("No music playlists found.")
+        return
+
+    snapshot = {
+        "version":        1,
+        "created":        datetime.now().isoformat(),
+        "server":         plex._baseurl,
+        "playlist_count": len(playlists),
+        "playlists":      [],
+    }
+
+    print(f"Backing up {len(playlists)} playlist(s)...")
+    for pl in playlists:
+        tracks = []
+        for item in pl.items():
+            locs = getattr(item, "locations", []) or []
+            tracks.append({
+                "title":  item.title,
+                "artist": item.grandparentTitle or "",
+                "album":  item.parentTitle or "",
+                "year":   getattr(item, "year", None),
+                "file":   locs[0] if locs else None,
+            })
+        snapshot["playlists"].append({
+            "name":    pl.title,
+            "summary": getattr(pl, "summary", "") or "",
+            "tracks":  tracks,
+        })
+        print(f"  {pl.title}  ({len(tracks)} tracks)")
+
+    try:
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        sys.exit(f"Error writing backup file: {e}")
+
+    log_rows = [log_row("backup", "", "", "", "", "success",
+                        f"Backed up {len(playlists)} playlists to {output_file}")]
+    append_log(log_file, log_rows)
+    print(f"\nBacked up {len(playlists)} playlist(s) → {output_file}")
+    print(f"Log  : {log_file}")
+
+
+def _build_track_lookup(library) -> tuple[dict, dict]:
+    """
+    Scan the library and return two lookup dicts for matching backup tracks:
+      path_lookup: {file_path: track_obj}
+      id_lookup:   {(artist_lower, title_lower): track_obj}
+    """
+    path_lookup: dict = {}
+    id_lookup:   dict = {}
+    artists = library.all()
+    total   = len(artists)
+    for i, artist in enumerate(artists, 1):
+        print(f"  [{i}/{total}] {artist.title}                    ", end="\r")
+        for album in artist.albums():
+            for track in album.tracks():
+                for loc in (getattr(track, "locations", []) or []):
+                    path_lookup[loc] = track
+                id_lookup[(artist.title.lower(), track.title.lower())] = track
+    print(f"\nIndexed {len(id_lookup)} track(s).")
+    return path_lookup, id_lookup
+
+
+def cmd_restore(
+    plex: PlexServer,
+    library_name: str | None,
+    input_file: str,
+    mode: str,
+    yes: bool,
+    log_file: str,
+) -> None:
+    try:
+        with open(input_file, "r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"Error reading backup file: {e}")
+
+    playlists_data = snapshot.get("playlists", [])
+    if not playlists_data:
+        print("Backup file contains no playlists.")
+        return
+
+    library = find_music_library(plex, library_name)
+    print("Building track index from library...")
+    path_lookup, id_lookup = _build_track_lookup(library)
+
+    backed_up = snapshot.get("created", "unknown")
+    print(f"\nRestoring {len(playlists_data)} playlist(s) from backup created {backed_up}\n")
+
+    log_rows: list[dict] = []
+    restored = 0
+
+    for pl_data in playlists_data:
+        name      = pl_data["name"]
+        matched:   list = []
+        unmatched: list = []
+
+        for t in pl_data.get("tracks", []):
+            obj = None
+            if t.get("file"):
+                obj = path_lookup.get(t["file"])
+            if obj is None:
+                obj = id_lookup.get((t["artist"].lower(), t["title"].lower()))
+            if obj:
+                matched.append(obj)
+            else:
+                unmatched.append(t)
+
+        miss_note = f", {len(unmatched)} not found in library" if unmatched else ""
+        print(f"  '{name}': {len(matched)} matched{miss_note}")
+
+        if not matched:
+            print(f"    Skipping — no tracks found in current library.")
+            continue
+
+        if not yes:
+            raw = input(
+                f"    Restore '{name}' ({len(matched)} tracks, mode={mode})? [y/N] "
+            ).strip().lower()
+            if raw not in ("y", "yes"):
+                print("    Skipped.")
+                continue
+
+        if mode == "replace":
+            for existing in plex.playlists():
+                if existing.title == name:
+                    existing.delete()
+                    break
+            _create_playlist_batched(plex, name, matched)
+            print(f"    Restored '{name}' ({len(matched)} tracks).")
+        else:  # append
+            existing = next(
+                (p for p in plex.playlists()
+                 if p.title == name and p.playlistType == "audio"),
+                None,
+            )
+            if existing:
+                existing_keys = {t.ratingKey for t in existing.items()}
+                new_tracks    = [t for t in matched if t.ratingKey not in existing_keys]
+                if new_tracks:
+                    _add_items_batched(existing, new_tracks)
+                    print(f"    Appended {len(new_tracks)} new track(s) to '{name}'.")
+                else:
+                    print(f"    '{name}' already up to date — nothing added.")
+                    continue
+            else:
+                _create_playlist_batched(plex, name, matched)
+                print(f"    Created '{name}' ({len(matched)} tracks).")
+
+        log_rows.append(log_row(
+            "restore", name, "", "", "", "success",
+            f"{len(matched)} tracks restored (mode={mode}){miss_note}",
+        ))
+        restored += 1
+
+    append_log(log_file, log_rows)
+    print(f"\nRestored {restored} playlist(s).")
+    if log_rows:
+        print(f"Log  : {log_file}")
+
+
 # ─── List playlists ───────────────────────────────────────────────────────────
 
 def list_playlists(plex: PlexServer):
@@ -1665,6 +1876,27 @@ def main():
     mer.add_argument("--log", default=default_log, metavar="FILE",
                      help=f"Log CSV file (default: {default_log})")
 
+    # ── backup ──
+    bak = sub.add_parser("backup",
+                         help="Snapshot all playlists to a portable JSON file")
+    bak.add_argument("--output", default="plex_backup.json", metavar="FILE",
+                     help="Output JSON file (default: plex_backup.json)")
+    bak.add_argument("--log",    default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
+    # ── restore ──
+    res = sub.add_parser("restore",
+                         help="Recreate playlists from a JSON backup file")
+    res.add_argument("--file", required=True, metavar="FILE",
+                     help="Backup JSON file to restore from")
+    res.add_argument("--mode", choices=["replace", "append"], default="append",
+                     help="append: add missing tracks only (default); "
+                          "replace: delete and recreate each playlist")
+    res.add_argument("--yes", "-y", action="store_true",
+                     help="Restore all playlists without prompting")
+    res.add_argument("--log",  default=default_log, metavar="FILE",
+                     help=f"Log CSV file (default: {default_log})")
+
     args = parser.parse_args()
 
     # ── Resolve connection settings: CLI flag > .env > auto-detect ──
@@ -1771,6 +2003,15 @@ def main():
             getattr(args, "allow_duplicates", False),
             args.yes,
             args.log,
+        )
+
+    elif args.command == "backup":
+        cmd_backup(plex, args.output, args.log)
+
+    elif args.command == "restore":
+        cmd_restore(
+            plex, library_name,
+            args.file, args.mode, args.yes, args.log,
         )
 
 

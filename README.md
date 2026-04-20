@@ -21,6 +21,8 @@ Export, import, and manage music playlists in Plex. Works with Plex running loca
    - [sync](#sync)
    - [rename](#rename)
    - [merge](#merge)
+   - [backup](#backup)
+   - [restore](#restore)
 6. [Output Files](#output-files)
 7. [Common Scenarios](#common-scenarios)
 
@@ -326,7 +328,7 @@ Enrichment complete. Cache saved to mb_cache.json
   ...
 ```
 
-> **Note (deep mode):** The first run queries MusicBrainz at one request per second to comply with their usage policy. A library of 5,000 tracks takes roughly 90 minutes. All results are stored in `mb_cache.json` — subsequent runs complete in seconds. If you interrupt mid-run, the partial cache is preserved.
+> **Note (deep mode):** Uses artist-level batch lookups (~2 requests per artist rather than ~2 per track), giving a roughly 10–20× speed improvement over per-track mode. A library of 5,000 tracks across 300 artists takes ~10 minutes instead of ~3 hours. All results are stored in `mb_cache.json` — subsequent runs complete in seconds. If you interrupt mid-run, progress is saved every 10 artists and resumes automatically on the next run.
 
 > **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 
@@ -583,6 +585,91 @@ Created 'Day Mix' with 84 tracks.
 ```
 
 > **Note:** If a playlist named `--name` already exists it will be replaced.
+
+---
+
+### backup
+
+Snapshots all music playlists to a single portable JSON file. Each playlist is saved with its name, summary, and full track list including file paths. The backup can be used to restore playlists after a Plex migration, library re-scan, or accidental deletion.
+
+**Flags:**
+
+| Flag       | Default            | Description                                               |
+|------------|--------------------|-----------------------------------------------------------|
+| `--output` | `plex_backup.json` | Output JSON file                                          |
+| `--log`    | `LOG_FILE` from `.env` | Path for the log CSV file                             |
+
+**Examples:**
+
+```bash
+# Back up all playlists to the default file
+python plex_playlist_tools.py backup
+
+# Back up to a custom location
+python plex_playlist_tools.py backup --output /backups/plex_2026-04-19.json
+```
+
+**Example output:**
+
+```
+Backing up 8 playlist(s)...
+  Chill Mix  (124 tracks)
+  Road Trip  (42 tracks)
+  Workout    (87 tracks)
+  ...
+
+Backed up 8 playlist(s) → plex_backup.json
+```
+
+---
+
+### restore
+
+Recreates playlists from a JSON backup file produced by the `backup` command. Each track is matched to the current library first by file path, then by artist + title. Useful after a Plex migration, server move, or library re-scan that changes internal track IDs.
+
+**Flags:**
+
+| Flag           | Default                | Description                                                                              |
+|----------------|------------------------|------------------------------------------------------------------------------------------|
+| `--file`       | (required)             | Backup JSON file to restore from                                                         |
+| `--mode`       | `append`               | `append`: add only tracks not already in the playlist; `replace`: delete and recreate    |
+| `--yes` / `-y` | off                    | Restore all playlists without prompting                                                   |
+| `--log`        | `LOG_FILE` from `.env` | Path for the log CSV file                                                                 |
+
+**Examples:**
+
+```bash
+# Restore interactively from a backup
+python plex_playlist_tools.py restore --file plex_backup.json
+
+# Restore everything without prompting (replace mode)
+python plex_playlist_tools.py restore --file plex_backup.json --mode replace --yes
+
+# Restore to a different server
+python plex_playlist_tools.py --url http://192.168.1.50:32400 --token TOKEN \
+  restore --file plex_backup.json --yes
+```
+
+**Example output:**
+
+```
+Building track index from library...
+  [287/287] scanned
+Indexed 9,847 track(s).
+
+Restoring 3 playlist(s) from backup created 2026-04-19T10:30:00
+
+  'Chill Mix': 124 matched
+    Restore 'Chill Mix' (124 tracks, mode=append)? [y/N] y
+    Created 'Chill Mix' (124 tracks).
+  'Road Trip': 41 matched, 1 not found in library
+    Restore 'Road Trip' (41 tracks, mode=append)? [y/N] y
+    Created 'Road Trip' (41 tracks).
+
+Restored 2 playlist(s).
+```
+
+> **Note:** Tracks not found in the current library are skipped and reported. This can happen if files have moved or been deleted since the backup was made. Use `--mode replace` to fully overwrite existing playlists rather than merging into them.
 
 ---
 
