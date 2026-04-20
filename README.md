@@ -248,59 +248,87 @@ python plex_playlist_tools.py import --file my_playlists.csv --images-dir ./cove
 
 Scans your music library and proposes playlist ideas based on genre, decade, mood, and artist. You can then choose which ones to create.
 
+There are two modes:
+
+- **Standard** (default) — fast; uses genre tags already in your Plex library, cascading from track → album → artist.
+- **Deep** (`--deep`) — thorough; looks up every track on [MusicBrainz](https://musicbrainz.org) to get accurate per-song mood and genre tags. Slow on the first run (≈1 second per track), but results are cached in a local JSON file so subsequent runs are instant.
+
 **Flags:**
 
-| Flag                  | Default | Description                                                              |
-|-----------------------|---------|--------------------------------------------------------------------------|
-| `--min-tracks`        | `10`    | Minimum tracks required for a suggestion to appear                       |
-| `--min-artist-tracks` | `20`    | Minimum tracks by one artist to generate a "Best of" suggestion          |
-| `--limit`             | `25`    | Maximum number of suggestions to display                                 |
-| `--create-all`        | off     | Create every suggestion without prompting                                |
-| `--log`               | `LOG_FILE` from `.env` | Path for the log CSV file                                   |
+| Flag                  | Default                    | Description                                                                                      |
+|-----------------------|----------------------------|--------------------------------------------------------------------------------------------------|
+| `--min-tracks`        | `10`                       | Minimum tracks required for a suggestion to appear                                               |
+| `--min-artist-tracks` | `20`                       | Minimum tracks by one artist for a "Best of" suggestion (requires `--include-best-of`)           |
+| `--limit`             | `25`                       | Maximum number of suggestions to display                                                         |
+| `--create-all`        | off                        | Create every suggestion without prompting                                                        |
+| `--deep`              | off                        | Enrich each track with MusicBrainz tags for per-song accuracy                                   |
+| `--cache-file`        | `mb_cache.json`            | JSON file used to cache MusicBrainz results between runs                                         |
+| `--include-best-of`   | off                        | Also suggest "Best of \<Artist\>" playlists (omitted by default)                                 |
+| `--log`               | `LOG_FILE` from `.env`     | Path for the log CSV file                                                                        |
 
-**Example:**
+**Examples:**
 
 ```bash
+# Standard suggestions from Plex metadata
 python plex_playlist_tools.py suggest
+
+# Deep suggestions using MusicBrainz (first run is slow; subsequent runs use cache)
+python plex_playlist_tools.py suggest --deep
+
+# Deep mode with a custom cache location
+python plex_playlist_tools.py suggest --deep --cache-file /data/mb_cache.json
+
+# Include "Best of <Artist>" suggestions
+python plex_playlist_tools.py suggest --include-best-of
+
+# Lower threshold for smaller libraries and create everything in one shot
+python plex_playlist_tools.py suggest --min-tracks 5 --create-all
+
+# Show up to 50 suggestions
+python plex_playlist_tools.py suggest --limit 50
 ```
 
-**Example output:**
+**Example output (standard):**
 
 ```
 Scanned 4,312 tracks across 287 artists.
 
 47 suggestion(s) found. Showing top 25:
 
-  [ 1]  [mood]          Chill Mix                    892 tracks — Ambient, Acoustic, Lo-Fi…
-  [ 2]  [mood]          Rock Mix                     754 tracks — Rock, Classic Rock, Alternative Rock…
-  [ 3]  [decade]        90s Hits                     612 tracks from 1990–1999
-  [ 4]  [genre]         Rock                         521 tracks
-  [ 5]  [decade + genre] 90s Rock                   318 tracks from 1990–1999
-  [ 6]  [artist]        Best of Pink Floyd            67 tracks by Pink Floyd
-  [ 7]  [mood]          High Energy Mix              445 tracks — Electronic, Dance, Metal…
+  [ 1]  [mood]           Chill Mix                    892 tracks — Ambient, Acoustic, Lo-Fi…
+  [ 2]  [mood]           Rock Mix                     754 tracks — Rock, Classic Rock, Alternative…
+  [ 3]  [decade]         90s Hits                     612 tracks from 1990–1999
+  [ 4]  [genre]          Rock                         521 tracks
+  [ 5]  [decade + genre] 90s Rock                     318 tracks from 1990–1999
   ...
 
 Enter number(s) to create (e.g. 1  or  1,3,5  or  all), or 'q' to quit:
-> 1,3,6
+> 1,3
   Created 'Chill Mix' (892 tracks)
   Created '90s Hits' (612 tracks)
-  Created 'Best of Pink Floyd' (67 tracks)
 
-Created 3 playlist(s).
+Created 2 playlist(s).
 ```
 
-```bash
-# Lower the threshold for smaller libraries
-python plex_playlist_tools.py suggest --min-tracks 5
+**Example output (deep mode):**
 
-# Create all suggestions without being asked
-python plex_playlist_tools.py suggest --create-all
+```
+Scanned 4,312 tracks across 287 artists.
+Enriching 4312 tracks via MusicBrainz (4312 new lookups needed; ~4312 seconds).
+Cache: mb_cache.json
+  [4312/4312] processed (4312 new MB lookups)
+Enrichment complete. Cache saved to mb_cache.json
 
-# Show more suggestions
-python plex_playlist_tools.py suggest --limit 50
+63 suggestion(s) found. Showing top 25:
+
+  [ 1]  [mood]  melancholic                  412 tracks — melancholic, sad, emotional…
+  [ 2]  [mood]  Chill Mix                    387 tracks — chill, relaxing, mellow…
+  ...
 ```
 
-> **Note:** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
+> **Note (deep mode):** The first run queries MusicBrainz at one request per second to comply with their usage policy. A library of 5,000 tracks takes roughly 90 minutes. All results are stored in `mb_cache.json` — subsequent runs complete in seconds. If you interrupt mid-run, the partial cache is preserved.
+
+> **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 
 ---
 

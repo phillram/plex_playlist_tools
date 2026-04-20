@@ -25,11 +25,13 @@ Connection (in order of precedence):
 
 import argparse
 import csv
+import json
 import os
 import platform
 import random
 import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
@@ -741,10 +743,132 @@ def scan_library(library) -> list[dict]:
     return data
 
 
+# ─── MusicBrainz helpers ─────────────────────────────────────────────────────
+
+_MB_RATE_LIMIT   = 1.05   # seconds between requests (MB ToS: max 1 req/sec)
+_mb_last_request = 0.0
+
+
+def _load_mb_cache(cache_file: str) -> dict:
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_mb_cache(cache_file: str, cache: dict) -> None:
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except OSError as e:
+        print(f"Warning: could not save MusicBrainz cache: {e}")
+
+
+def _mb_call(fn, *args, **kwargs):
+    """Rate-limited wrapper for musicbrainzngs calls (1 req/sec)."""
+    global _mb_last_request
+    wait = _MB_RATE_LIMIT - (time.time() - _mb_last_request)
+    if wait > 0:
+        time.sleep(wait)
+    result = fn(*args, **kwargs)
+    _mb_last_request = time.time()
+    return result
+
+
+def _fetch_mb_tags(artist: str, title: str, album: str, cache: dict) -> list[str]:
+    """
+    Return folksonomy tag names for a recording from MusicBrainz.
+    Results are cached under a compound (artist, title) key.
+    """
+    key = f"{artist.lower()}|{title.lower()}"
+    if key in cache:
+        return cache[key]
+
+    tags: list[str] = []
+    try:
+        import musicbrainzngs
+        result = _mb_call(
+            musicbrainzngs.search_recordings,
+            recording=title,
+            artist=artist,
+            release=album,
+            limit=5,
+        )
+        recordings = result.get("recording-list", [])
+        if recordings:
+            rec_id = recordings[0]["id"]
+            rec = _mb_call(
+                musicbrainzngs.get_recording_by_id,
+                rec_id,
+                includes=["tags"],
+            )
+            tag_list = rec.get("recording", {}).get("tag-list", [])
+            tag_list.sort(key=lambda t: -int(t.get("count", 0)))
+            tags = [t["name"] for t in tag_list[:20]]
+    except Exception:
+        pass
+
+    cache[key] = tags
+    return tags
+
+
+def scan_library_deep(library, cache_file: str) -> list[dict]:
+    """
+    Like scan_library but enriches each track with per-song MusicBrainz tags.
+    Uses a JSON cache to avoid re-fetching; rate-limited to 1 req/sec.
+    """
+    try:
+        import musicbrainzngs
+    except ImportError:
+        sys.exit(
+            "Error: musicbrainzngs is required for --deep mode.\n"
+            "Install it with:  pip install musicbrainzngs"
+        )
+
+    musicbrainzngs.set_useragent("PlexPlaylistTools", "1.0",
+                                 "https://github.com/user/plex_playlist_tools")
+
+    cache = _load_mb_cache(cache_file)
+    data  = scan_library(library)
+    total = len(data)
+
+    new_lookups = sum(
+        1 for t in data
+        if f"{t['artist'].lower()}|{t['title'].lower()}" not in cache
+    )
+    print(
+        f"Enriching {total} tracks via MusicBrainz "
+        f"({new_lookups} new lookups needed; ~{new_lookups} seconds).\n"
+        f"Cache: {cache_file}"
+    )
+
+    looked_up = 0
+    for i, track in enumerate(data, 1):
+        key    = f"{track['artist'].lower()}|{track['title'].lower()}"
+        is_new = key not in cache
+        mb_tags = _fetch_mb_tags(track["artist"], track["title"], track["album"], cache)
+        if mb_tags:
+            track["genres"] = mb_tags
+        if is_new:
+            looked_up += 1
+        if i % 100 == 0 or i == total:
+            print(f"  [{i}/{total}] processed ({looked_up} new MB lookups)   ", end="\r")
+            if looked_up > 0 and i % 500 == 0:
+                _save_mb_cache(cache_file, cache)
+
+    _save_mb_cache(cache_file, cache)
+    print(f"\nEnrichment complete. Cache saved to {cache_file}")
+    return data
+
+
 def build_suggestions(
     track_data: list[dict],
     min_tracks: int = 10,
     min_artist_tracks: int = 20,
+    include_best_of: bool = False,
 ) -> list[dict]:
     """
     Analyse track metadata and return a deduplicated, ranked list of
@@ -815,19 +939,20 @@ def build_suggestions(
                 "category":    "decade + genre",
             })
 
-    # ── 5. Artist "Best Of" ───────────────────────────────────────────────────
-    artist_bucket: dict = defaultdict(list)
-    for t in track_data:
-        artist_bucket[t["artist"]].append(t)
+    # ── 5. Artist "Best Of" (opt-in) ─────────────────────────────────────────
+    if include_best_of:
+        artist_bucket: dict = defaultdict(list)
+        for t in track_data:
+            artist_bucket[t["artist"]].append(t)
 
-    for artist, tracks in sorted(artist_bucket.items(), key=lambda x: -len(x[1])):
-        if len(tracks) >= min_artist_tracks:
-            suggestions.append({
-                "name":        f"Best of {artist}",
-                "description": f"All {len(tracks)} tracks by {artist}",
-                "tracks":      [t["obj"] for t in tracks],
-                "category":    "artist",
-            })
+        for artist, tracks in sorted(artist_bucket.items(), key=lambda x: -len(x[1])):
+            if len(tracks) >= min_artist_tracks:
+                suggestions.append({
+                    "name":        f"Best of {artist}",
+                    "description": f"All {len(tracks)} tracks by {artist}",
+                    "tracks":      [t["obj"] for t in tracks],
+                    "category":    "artist",
+                })
 
     # Deduplicate, then sort: category group first, track count descending within each group.
     # Artist "Best of" playlists always appear last.
@@ -948,11 +1073,16 @@ def cmd_suggest(
     min_artist_tracks: int,
     limit: int,
     create_all: bool,
+    deep: bool,
+    cache_file: str,
+    include_best_of: bool,
     log_file: str,
 ) -> None:
-    library         = find_music_library(plex, library_name)
-    track_data      = scan_library(library)
-    all_suggestions = build_suggestions(track_data, min_tracks, min_artist_tracks)
+    library    = find_music_library(plex, library_name)
+    track_data = scan_library_deep(library, cache_file) if deep else scan_library(library)
+    all_suggestions = build_suggestions(
+        track_data, min_tracks, min_artist_tracks, include_best_of
+    )
 
     if not all_suggestions:
         print("No suggestions generated — try lowering --min-tracks.")
@@ -1443,6 +1573,13 @@ def main():
                      help="Maximum number of suggestions to display (default: 25)")
     sug.add_argument("--create-all",        action="store_true",
                      help="Create every suggestion without prompting")
+    sug.add_argument("--deep",              action="store_true",
+                     help="Look up each track on MusicBrainz for accurate per-song "
+                          "mood/genre tags (slow on first run; results cached)")
+    sug.add_argument("--cache-file",        default="mb_cache.json", metavar="FILE",
+                     help="JSON cache file for MusicBrainz lookups (default: mb_cache.json)")
+    sug.add_argument("--include-best-of",   action="store_true",
+                     help="Include 'Best of <Artist>' suggestions (omitted by default)")
     sug.add_argument("--log",               default=default_log, metavar="FILE",
                      help=f"Log CSV file (default: {default_log})")
 
@@ -1579,7 +1716,9 @@ def main():
         cmd_suggest(
             plex, library_name,
             args.min_tracks, args.min_artist_tracks,
-            args.limit, args.create_all, args.log,
+            args.limit, args.create_all,
+            args.deep, args.cache_file, args.include_best_of,
+            args.log,
         )
 
     elif args.command == "generate":
