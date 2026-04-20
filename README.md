@@ -253,7 +253,7 @@ Scans your music library and proposes playlist ideas based on genre, decade, moo
 There are two modes:
 
 - **Standard** (default) — fast; uses genre tags already in your Plex library, cascading from track → album → artist.
-- **Deep** (`--deep`) — thorough; looks up every track on [MusicBrainz](https://musicbrainz.org) to get accurate per-song mood and genre tags. Slow on the first run (≈1 second per track), but results are cached in a local JSON file so subsequent runs are instant.
+- **Deep** (`--deep`) — thorough; queries [MusicBrainz](https://musicbrainz.org) for accurate mood and genre tags. Uses artist-level batch lookups (~2 requests per artist) rather than one request per track, so a library of 5,000 tracks across 300 artists takes roughly 10 minutes on the first run. All results are cached locally, so subsequent runs complete in seconds.
 
 **Flags:**
 
@@ -263,7 +263,7 @@ There are two modes:
 | `--min-artist-tracks` | `20`                       | Minimum tracks by one artist for a "Best of" suggestion (requires `--include-best-of`)           |
 | `--limit`             | `25`                       | Maximum number of suggestions to display                                                         |
 | `--create-all`        | off                        | Create every suggestion without prompting                                                        |
-| `--deep`              | off                        | Enrich each track with MusicBrainz tags for per-song accuracy                                   |
+| `--deep`              | off                        | Look up MusicBrainz tags for more accurate mood/genre suggestions                               |
 | `--cache-file`        | `mb_cache.json`            | JSON file used to cache MusicBrainz results between runs                                         |
 | `--include-best-of`   | off                        | Also suggest "Best of \<Artist\>" playlists (omitted by default)                                 |
 | `--log`               | `LOG_FILE` from `.env`     | Path for the log CSV file                                                                        |
@@ -316,19 +316,22 @@ Created 2 playlist(s).
 
 ```
 Scanned 4,312 tracks across 287 artists.
-Enriching 4312 tracks via MusicBrainz (4312 new lookups needed; ~4312 seconds).
+Enriching tracks for 287 artist(s) via MusicBrainz.
+Estimated time: ~574s (artist browse mode; saves every 10 artists).
 Cache: mb_cache.json
-  [4312/4312] processed (4312 new MB lookups)
+  [287/287] Pink Floyd
 Enrichment complete. Cache saved to mb_cache.json
 
 63 suggestion(s) found. Showing top 25:
 
-  [ 1]  [mood]  melancholic                  412 tracks — melancholic, sad, emotional…
-  [ 2]  [mood]  Chill Mix                    387 tracks — chill, relaxing, mellow…
+  [ 1]  [mood]           melancholic                  412 tracks — melancholic, sad, emotional…
+  [ 2]  [mood]           Chill Mix                    387 tracks — chill, relaxing, mellow…
+  [ 3]  [genre]          indie rock                   341 tracks
+  [ 4]  [decade]         90s Hits                     298 tracks from 1990–1999
   ...
 ```
 
-> **Note (deep mode):** Uses artist-level batch lookups (~2 requests per artist rather than ~2 per track), giving a roughly 10–20× speed improvement over per-track mode. A library of 5,000 tracks across 300 artists takes ~10 minutes instead of ~3 hours. All results are stored in `mb_cache.json` — subsequent runs complete in seconds. If you interrupt mid-run, progress is saved every 10 artists and resumes automatically on the next run.
+> **Note (deep mode):** Fetches all recordings for each artist in one paginated request, then matches them to your Plex tracks by title. Progress is saved every 10 artists — if you interrupt and re-run, already-processed artists are skipped instantly from the cache. Tracks whose titles don't match a MusicBrainz recording fall back to their existing Plex genre tags.
 
 > **Note (standard mode):** Suggestions are generated from genre tags, release years, and artist metadata already in your Plex library. If your library has limited metadata, try lowering `--min-tracks`.
 
@@ -708,7 +711,7 @@ Produced by all commands that modify playlists. Each run **appends** to the log 
 | Column      | Description                                                                                                         |
 |-------------|---------------------------------------------------------------------------------------------------------------------|
 | Timestamp   | Date and time (ISO 8601)                                                                                            |
-| Operation   | `export`, `import`, `generate`, `dedupe`, `shuffle`, `sync`, `merge`, `export_image`, or `import_image`             |
+| Operation   | `export`, `import`, `generate`, `dedupe`, `shuffle`, `sync`, `merge`, `backup`, `restore`, `export_image`, or `import_image` |
 | Playlist    | Playlist name                                                                                                       |
 | Artist      | Artist name (blank for image, generate, shuffle, and merge rows)                                                    |
 | Album       | Album title (blank for image, generate, shuffle, and merge rows)                                                    |
@@ -730,22 +733,33 @@ python plex_playlist_tools.py suggest
 ### Back up all playlists and restore them
 
 ```bash
-# Export everything including cover images
-python plex_playlist_tools.py export --all-playlists --output backup.csv --images-dir ./covers
+# Snapshot all playlists to a JSON file
+python plex_playlist_tools.py backup --output plex_backup.json
 
-# Restore on any Plex server
+# Restore on the same or a different Plex server
+python plex_playlist_tools.py restore --file plex_backup.json --yes
+
+# Restore to a different server
 python plex_playlist_tools.py --url http://192.168.1.50:32400 --token YOUR_TOKEN \
-  import --file backup.csv --images-dir ./covers --mode replace
+  restore --file plex_backup.json --mode replace --yes
 ```
+
+> The backup stores track file paths and artist/title metadata. Restore matches by file path first, then falls back to artist + title — so it works even after a Plex library re-scan or server migration.
 
 ### Create playlists automatically from your library
 
 ```bash
-# Browse suggestions and pick what to create
+# Browse suggestions and pick what to create (uses Plex genre tags)
 python plex_playlist_tools.py suggest
 
-# Create everything at once (no prompts)
+# Create everything at once without prompting
 python plex_playlist_tools.py suggest --create-all
+
+# Deep mode: enrich tags from MusicBrainz first (slow on first run, cached after)
+python plex_playlist_tools.py suggest --deep
+
+# Include "Best of <Artist>" suggestions
+python plex_playlist_tools.py suggest --include-best-of
 ```
 
 ### Create a specific playlist by describing it
